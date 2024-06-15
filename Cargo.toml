@@ -1,0 +1,30 @@
+[package]
+name = "vanity"
+version = "0.2.0"
+edition = "2021"
+authors = ["Cavey Cool <caveycool@gmail.com>", "Magnetar Fields <0xMAGNETAR@proton.me>"]
+license = "MIT OR Apache-2.0"
+
+[features]
+gpu = ["cc"]
+default = []
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+
+[dependencies]
+bs58 = "0.5.1"
+clap = { version = "4.5.7", features = ["derive"] }
+ed25519-dalek = "2.1.1"
+fd_bs58 = "0.1.0"
+logfather = "0.2.6"
+num-format = "0.4.4"
+rand = "0.8.5"
+rayon = "1.10.0"
+serde_json = "1.0.117"
+sha2 = "0.10.8"
+
+[build-dependencies]
+cc = { version = "1.0.98", optional = true }
