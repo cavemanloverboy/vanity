@@ -4,7 +4,7 @@ A *bLaZinGlY fAsT* tool for grinding vanity addresses on Solana.
 
 ## 1) What
 
-Typically, solana developers wishing to obtain a vanity address for their program or token grind out ed25519 keypairs and sign off on a `SystemInstruction::CreateAccount` instruction. However, by using `SystemInstruction::CreateAccountWithSeed`, developers can get extreme speedups on address searches. Although not as generic, this method covers many use cases.
+Typically, solana developers wishing to obtain a vanity address for their program or token grind out ed25519 keypairs and sign off on a `SystemInstruction::CreateAccount` instruction. However, by using `SystemInstruction::CreateAccountWithSeed`, developers can bypass ed25519 and get extreme speedups on address searches. Although not as generic, this method covers many use cases.
 
 ## 2) H
 
