@@ -7,6 +7,7 @@ authors = [
     "Magnetar Fields <0xMAGNETAR@proton.me>",
 ]
 license = "MIT OR Apache-2.0"
+description = "A *bLaZinGlY fAsT* tool for grinding vanity addresses on Solana"
 
 [features]
 gpu = ["cc"]
