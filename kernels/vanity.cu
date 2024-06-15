@@ -237,21 +237,3 @@ __device__ bool matches_target(unsigned char *a, unsigned char *target, uint64_t
     }
     return true;
 }
-
-__device__ uint8_t hi[32] = {
-    11, 173, 87, 184, 147, 234, 104, 132, 137, 81, 39, 28, 37, 108, 223, 35, 44, 157, 207, 159, 1, 96, 51, 104, 99, 171, 194, 255, 255, 255, 255, 255};
-__device__ uint8_t lo[32] = {
-    11, 173, 87, 184, 50, 176, 108, 7, 110, 59, 244, 93, 50, 24, 226, 112, 40, 115, 18, 145, 61, 45, 152, 223, 115, 133, 252, 192, 0, 0, 0, 0};
-__device__ bool in_target_range(unsigned char *a)
-{
-    for (int i = 0; i < 32; i++)
-    {
-        if (a[i] == hi[i] && a[i] == lo[i])
-            continue;
-        if (a[i] <= hi[i] && a[i] >= lo[i])
-            return true;
-        else
-            return false;
-    }
-    return false;
-}
