@@ -1,0 +1,23 @@
+# Use the NVIDIA CUDA image as a base
+FROM nvidia/cuda:12.5.0-devel-ubuntu20.04
+
+
+WORKDIR /usr/src/app
+
+RUN apt-get update && apt-get install -y \
+    git \
+    build-essential \
+    curl \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+
+# add rust to PATH
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# clone the repository
+RUN git clone https://github.com/cavemanloverboy/vanity.git .
+# build w features=gpu
+RUN cargo build --release --features=gpu
+
+# use binary as an entry point
+ENTRYPOINT ["./target/release/vanity"]
+CMD ["--help"]
