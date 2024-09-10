@@ -238,10 +238,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3dca9240753cf90908d7e4aac30f630662b02aebaa1b58a3cadabdb23385b58b"
 
 [[package]]
-name = "fd_bs58"
+name = "five8"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "098ab531ebf4981e0e26c56377e206c0cffaed4d46d567f5475f58cfa1ea81cf"
+dependencies = [
+ "five8_core",
+]
+
+[[package]]
+name = "five8_core"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdaac1b30ff95de4562a79ae990f91ac7bf2062d7313cc25c58987762c8e8160"
+checksum = "9b2a72055cd9cffc40c9f75f1e5810c80559e158796cf2202292ce4745889588"
 
 [[package]]
 name = "generic-array"
@@ -501,7 +510,7 @@ version = "0.2.0"
 dependencies = [
  "cc",
  "clap",
- "fd_bs58",
+ "five8",
  "logfather",
  "num-format",
  "rand",

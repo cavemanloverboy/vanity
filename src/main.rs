@@ -5,6 +5,7 @@ use rand::{distributions::Alphanumeric, Rng};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use sha2::{Digest, Sha256};
 
+use core::str;
 use std::{
     array,
     sync::atomic::{AtomicBool, Ordering},
@@ -102,7 +103,9 @@ fn main() {
                             .chain_update(&args.owner)
                             .finalize()
                             .into();
-                        let out_str = fd_bs58::encode_32(reconstructed);
+                        let mut encoded = [0u8; five8::BASE58_ENCODED_32_MAX_LEN];
+                        let len = five8::encode_32(reconstructed, &mut encoded);
+                        let out_str = str::from_utf8(encoded[..len as usize]).unwrap();
                         let out_str_target_check = maybe_bs58_aware_lowercase(&out_str, args.case_insensitive);
                         let count = u64::from_le_bytes(array::from_fn(|i| out[16 + i]));
                         logfather::info!(
@@ -130,6 +133,7 @@ fn main() {
         let mut count = 0_u64;
 
         let base_sha = Sha256::new().chain_update(args.base);
+        let mut out = [0u8; five8::BASE58_ENCODED_32_MAX_LEN];
         loop {
             if EXIT.load(Ordering::Acquire) {
                 return;
@@ -144,8 +148,9 @@ fn main() {
                 .chain_update(args.owner)
                 .finalize()
                 .into();
-            let pubkey = fd_bs58::encode_32(pubkey_bytes);
-            let out_str_target_check = maybe_bs58_aware_lowercase(&pubkey, args.case_insensitive);
+            let len = five8::encode_32(&pubkey_bytes, &mut out);
+            let pubkey = str::from_utf8(&out[..len as usize]).unwrap();
+            let out_str_target_check = maybe_bs58_aware_lowercase(pubkey, args.case_insensitive);
             
             count += 1;
             
@@ -232,7 +237,9 @@ fn new_gpu_seed(gpu_id: u32, iteration: u64) -> [u8; 32] {
 }
 
 fn parse_pubkey(input: &str) -> Result<[u8; 32], String> {
-    fd_bs58::decode_32(input).map_err(|e| format!("{e:?}"))
+    let mut out = [0u8; 32];
+    five8::decode_32(input, &mut out).map_err(|e| format!("{e:?}"))?;
+    Ok(out)
 }
 
 fn maybe_update_num_cpus(num_cpus: &mut u32) {
