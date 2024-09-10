@@ -20,7 +20,7 @@ codegen-units = 1
 
 [dependencies]
 clap = { version = "4.5.7", features = ["derive"] }
-fd_bs58 = "0.1.0"
+five8 = "0.2.0"
 logfather = "0.2.6"
 num-format = "0.4.4"
 rand = "0.8.5"
