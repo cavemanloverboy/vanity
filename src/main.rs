@@ -240,7 +240,7 @@ fn grind(mut args: GrindArgs) {
                 .spawn(move || {
                     logfather::trace!("starting gpu {gpu_index}");
 
-                    let mut out = [0; 16];
+                    let mut out = [0; 24];
                     for iteration in 0_u64.. {
                         // Exit if a thread found a solution
                         if EXIT.load(Ordering::SeqCst) {
