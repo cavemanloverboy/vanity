@@ -252,7 +252,7 @@ fn grind(mut args: GrindArgs) {
                         let seed = new_gpu_seed(gpu_index, iteration);
                         let timer = Instant::now();
                         unsafe {
-                            vanity_round(gpu_index, seed.as_ref().as_ptr(), args.base.as_ptr(), args.owner.as_ptr(), target.as_ptr(), target.len() as u64, out.as_mut_ptr(), args.case_insensitive);
+                            vanity_round(gpu_index, seed.as_ref().as_ptr(), args.base.to_bytes().as_ptr(), args.owner.to_bytes().as_ptr(), target.as_ptr(), target.len() as u64, out.as_mut_ptr(), args.case_insensitive);
                         }
                         let time_sec = timer.elapsed().as_secs_f64();
 
