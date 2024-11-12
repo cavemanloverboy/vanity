@@ -275,7 +275,7 @@ fn grind(mut args: GrindArgs) {
                         );
 
                         if out_str_target_check.starts_with(target) {
-                            logfather::info!("out seed = {out:?} -> {}", core::str::from_utf8(&out).unwrap());
+                            logfather::info!("out seed = {out:?} -> {}", core::str::from_utf8(&out[..16]).unwrap());
                             EXIT.store(true, Ordering::SeqCst);
                             logfather::trace!("gpu thread {gpu_index} exiting");
                             return;
