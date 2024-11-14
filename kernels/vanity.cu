@@ -168,7 +168,7 @@ vanity_search(uint8_t *buffer, uint64_t stride)
     cuda_sha256_init(&address_sha);
     cuda_sha256_update(&address_sha, (BYTE *)base, 32);
 
-    for (uint64_t iter = 0; iter < 1000 * 1000 * 1000; iter++)
+    for (uint64_t iter = 0; iter < 1000 * 1000 * 1000 * 1000; iter++)
     {
         // Has someone found a result?
         if (iter % 100 == 0)
