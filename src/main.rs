@@ -40,9 +40,13 @@ pub struct GrindArgs {
     #[clap(long, value_parser = parse_pubkey)]
     pub owner: Pubkey,
 
-    /// The target prefix for the pubkey
+    /// The prefix for the pubkey
     #[clap(long)]
-    pub target: String,
+    pub prefix: String,
+
+    /// The suffix for the pubkey
+    #[clap(long)]
+    pub suffix: String,
 
     /// Whether user cares about the case of the pubkey
     #[clap(long, default_value_t = false)]
@@ -213,8 +217,8 @@ pub fn deploy_with_max_program_len_with_seed(
 fn grind(mut args: GrindArgs) {
     maybe_update_num_cpus(&mut args.num_cpus);
 
-    let target = get_validated_target(&args);
-
+    let (prefix, suffix)= get_validated_prefix_and_suffix(&args);
+    
     // Initialize logger with optional logfile
     let mut logger = Logger::new();
     if let Some(ref logfile) = args.logfile {
@@ -252,7 +256,16 @@ fn grind(mut args: GrindArgs) {
                         let seed = new_gpu_seed(gpu_index, iteration);
                         let timer = Instant::now();
                         unsafe {
-                            vanity_round(gpu_index, seed.as_ref().as_ptr(), args.base.to_bytes().as_ptr(), args.owner.to_bytes().as_ptr(), target.as_ptr(), target.len() as u64, out.as_mut_ptr(), args.case_insensitive);
+                            vanity_round(gpu_index, 
+                                seed.as_ref().as_ptr(), 
+                                args.base.to_bytes().as_ptr(), 
+                                args.owner.to_bytes().as_ptr(), 
+                                prefix.as_ptr(),
+                                prefix.len() as u64,
+                                suffix.as_ptr(),
+                                suffix.len() as u64,
+                                  out.as_mut_ptr(), 
+                                  args.case_insensitive);
                         }
                         let time_sec = timer.elapsed().as_secs_f64();
 
@@ -264,17 +277,19 @@ fn grind(mut args: GrindArgs) {
                             .finalize()
                             .into();
                         let out_str = fd_bs58::encode_32(reconstructed);
-                        let out_str_target_check = maybe_bs58_aware_lowercase(&out_str, args.case_insensitive);
+                        let out_str_check = maybe_bs58_aware_lowercase(&out_str, args.case_insensitive);
                         let count = u64::from_le_bytes(array::from_fn(|i| out[16 + i]));
                         logfather::info!(
                             "{}.. found in {:.3} seconds on gpu {gpu_index:>3}; {:>13} iters; {:>12} iters/sec",
-                            &out_str[..(target.len() + 4).min(40)],
+                            &out_str[..(prefix.len() + suffix.len() + 4).min(40)],
                             time_sec,
                             count.to_formatted_string(&Locale::en),
                             ((count as f64 / time_sec) as u64).to_formatted_string(&Locale::en)
                         );
+                        
+                        
 
-                        if out_str_target_check.starts_with(target) {
+                        if out_str_check.starts_with(prefix)  && out_str_check.ends_with(suffix){
                             logfather::info!("out seed = {out:?} -> {}", core::str::from_utf8(&out[..16]).unwrap());
                             EXIT.store(true, Ordering::SeqCst);
                             logfather::trace!("gpu thread {gpu_index} exiting");
@@ -306,15 +321,15 @@ fn grind(mut args: GrindArgs) {
                 .finalize()
                 .into();
             let pubkey = fd_bs58::encode_32(pubkey_bytes);
-            let out_str_target_check = maybe_bs58_aware_lowercase(&pubkey, args.case_insensitive);
+            let out_str_check = maybe_bs58_aware_lowercase(&pubkey, args.case_insensitive);
 
             count += 1;
 
-            // Did cpu find target?
-            if out_str_target_check.starts_with(target) {
+            // Did cpu find prefix and suffix?
+            if out_str_check.starts_with(prefix) && out_str_check.ends_with(suffix) {
                 let time_secs = timer.elapsed().as_secs_f64();
                 logfather::info!(
-                    "cpu {i} found target: {pubkey}; {seed:?} -> {} in {:.3}s; {} attempts; {} attempts per second",
+                    "cpu {i} found key: {pubkey}; {seed:?} -> {} in {:.3}s; {} attempts; {} attempts per second",
                     core::str::from_utf8(&seed).unwrap(),
                     time_secs,
                     count.to_formatted_string(&Locale::en),
@@ -328,34 +343,42 @@ fn grind(mut args: GrindArgs) {
     });
 }
 
-fn get_validated_target(args: &GrindArgs) -> &'static str {
+fn get_validated_prefix_and_suffix(args: &GrindArgs) -> (&'static str, &'static str) {
     // Static string of BS58 characters
     const BS58_CHARS: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
-    // Validate target (i.e. does it include 0, O, I, l)
-    //
-    // maybe TODO: technically we could accept I or o if case-insensitivity but I suspect
-    // most users will provide lowercase targets for case-insensitive searches
-    for c in args.target.chars() {
+    // Validate prefix (i.e. does it include 0, O, I, l)
+    for c in args.prefix.chars() {
         assert!(
             BS58_CHARS.contains(c),
-            "your target contains invalid bs58: {}",
+            "your prefix contains invalid bs58: {}",
             c
         );
     }
 
-    // bs58-aware lowercase converison
-    let target = maybe_bs58_aware_lowercase(&args.target, args.case_insensitive);
+    // Validate suffix (i.e. does it include 0, O, I, l)
+    for c in args.suffix.chars() {
+        assert!(
+            BS58_CHARS.contains(c),
+            "your suffix contains invalid bs58: {}",
+            c
+        );
+    }
 
-    target.leak()
+    // bs58-aware lowercase conversion for both prefix and suffix
+    let prefix = maybe_bs58_aware_lowercase(&args.prefix, args.case_insensitive);
+    let suffix = maybe_bs58_aware_lowercase(&args.suffix, args.case_insensitive);
+
+    (prefix.leak(), suffix.leak())
 }
 
-fn maybe_bs58_aware_lowercase(target: &str, case_insensitive: bool) -> String {
+
+fn maybe_bs58_aware_lowercase(item: &str, case_insensitive: bool) -> String {
     // L is only char that shouldn't be converted to lowercase in case-insensitivity case
     const LOWERCASE_EXCEPTIONS: &str = "L";
 
     if case_insensitive {
-        target
+        item
             .chars()
             .map(|c| {
                 if LOWERCASE_EXCEPTIONS.contains(c) {
@@ -366,9 +389,11 @@ fn maybe_bs58_aware_lowercase(target: &str, case_insensitive: bool) -> String {
             })
             .collect::<String>()
     } else {
-        target.to_string()
+        item.to_string()
     }
 }
+
+
 
 extern "C" {
     pub fn vanity_round(
@@ -376,8 +401,10 @@ extern "C" {
         seed: *const u8,
         base: *const u8,
         owner: *const u8,
-        target: *const u8,
-        target_len: u64,
+        prefix: *const u8,
+        prefix_len: u64,
+        suffix: *const u8,
+        suffix_len: u64,
         out: *mut u8,
         case_insensitive: bool,
     );

@@ -5,7 +5,6 @@
 
 __device__ int done = 0;
 __device__ unsigned long long count = 0;
-
 __device__ bool d_case_insensitive = false;
 
 // TODO:
@@ -16,8 +15,10 @@ extern "C" void vanity_round(
     uint8_t *seed,
     uint8_t *base,
     uint8_t *owner,
-    char *target,
-    uint64_t target_len,
+    char *prefix,
+    uint64_t prefix_len,
+    char *suffix,
+    uint64_t suffix_len,
     uint8_t *out,
     bool case_insensitive)
 {
@@ -30,21 +31,29 @@ extern "C" void vanity_round(
         return;
     }
 
+
     // Set device and initialize it
     cudaSetDevice(id);
     gpu_init(id);
 
-    // Allocate device buffer for seed, base, owner, out, target len, target
+
+    // Allocate device buffer for seed, base, owner, out, prefix len, prefix, suffix_len, suffix
     uint8_t *d_buffer;
     cudaError_t err = cudaMalloc(
         (void **)&d_buffer,
         32               // seed
             + 32         // base
             + 32         // owner
-            + 8          // target len
-            + target_len // target
+            + 8          // prefix len
+            + prefix_len // prefix
+            + 8          // suffix len
+            + suffix_len // suffix
             + 16         // out (16 byte seed)
     );
+    printf("CUDA device count: %d\n", deviceCount);
+    printf("Setting GPU device %d\n", id);
+    printf("CUDA malloc successful for d_buffer\n");
+
     if (err != cudaSuccess)
     {
         printf("CUDA malloc error (d_buffer): %s\n", cudaGetErrorString(err));
@@ -72,22 +81,48 @@ extern "C" void vanity_round(
         cudaFree(d_buffer);
         return;
     }
-    err = cudaMemcpy(d_buffer + 96, &target_len, 8, cudaMemcpyHostToDevice);
+    err = cudaMemcpy(d_buffer + 96, &prefix_len, 8, cudaMemcpyHostToDevice);
     if (err != cudaSuccess)
     {
-        printf("CUDA memcpy error (target_len): %s\n", cudaGetErrorString(err));
+        printf("CUDA memcpy error (prefix_len): %s\n", cudaGetErrorString(err));
         cudaFree(d_buffer);
         return;
     }
-    err = cudaMemcpy(d_buffer + 104, target, target_len, cudaMemcpyHostToDevice);
+    
+    // Copy prefix to device memory
+    err = cudaMemcpy(d_buffer + 104, prefix, prefix_len, cudaMemcpyHostToDevice);
     if (err != cudaSuccess)
     {
-        printf("CUDA memcpy error (target): %s\n", cudaGetErrorString(err));
+        printf("CUDA memcpy error (prefix): %s\n", cudaGetErrorString(err));
+        cudaFree(d_buffer);
+        return;
+    }
+    
+    // Copy suffix length to device memory
+    err = cudaMemcpy(d_buffer + 104 + prefix_len, &suffix_len, 8, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memcpy error (suffix_len): %s\n", cudaGetErrorString(err));
+        cudaFree(d_buffer);
+        return;
+    }
+    
+    // Copy suffix to device memory
+    err = cudaMemcpy(d_buffer + 112 + prefix_len, suffix, suffix_len, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memcpy error (suffix): %s\n", cudaGetErrorString(err));
         cudaFree(d_buffer);
         return;
     }
     err = cudaMemcpyToSymbol(d_case_insensitive, &case_insensitive, 1, 0, cudaMemcpyHostToDevice);
-
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memcpy to symbol error (done): %s\n", cudaGetErrorString(err));
+        cudaFree(d_buffer);
+        return;
+    }
+    
     // Reset tracker and counter using cudaMemcpyToSymbol
     int zero = 0;
     unsigned long long zero_ull = 0;
@@ -106,6 +141,7 @@ extern "C" void vanity_round(
         return;
     }
 
+    printf("Launching vanity_search kernel\n");
     // Launch vanity search kernel
     vanity_search<<<num_blocks, num_threads>>>(d_buffer, num_blocks * num_threads);
     cudaDeviceSynchronize();
@@ -118,14 +154,19 @@ extern "C" void vanity_round(
         return;
     }
 
+    printf("Vanity search kernel launched and synchronized\n");
+
     // Copy result to host
-    err = cudaMemcpy(out, d_buffer + 104 + target_len, 16, cudaMemcpyDeviceToHost);
+    // Copy the output from device to host
+    err = cudaMemcpy(out, d_buffer + 104 + prefix_len + suffix_len, 16, cudaMemcpyDeviceToHost);
     if (err != cudaSuccess)
     {
         printf("CUDA memcpy error (d_out): %s\n", cudaGetErrorString(err));
         cudaFree(d_buffer);
         return;
     }
+
+    // Copy the 'count' value from the device to host
     err = cudaMemcpyFromSymbol(out + 16, count, 8, 0, cudaMemcpyDeviceToHost);
     if (err != cudaSuccess)
     {
@@ -134,8 +175,11 @@ extern "C" void vanity_round(
         return;
     }
 
+
+
     // Free pointers
     cudaFree(d_buffer);
+
 }
 
 __device__ uint8_t const alphanumeric[63] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -147,15 +191,23 @@ vanity_search(uint8_t *buffer, uint64_t stride)
     uint8_t *seed = buffer;
     uint8_t *base = buffer + 32;
     uint8_t *owner = buffer + 64;
-    uint64_t target_len;
-    memcpy(&target_len, buffer + 96, 8);
-    uint8_t *target = buffer + 104;
-    uint8_t *out = (buffer + 104 + target_len);
+    uint64_t prefix_len;
+    uint64_t suffix_len;
+    
+    // Assuming the prefix and suffix lengths are already in the buffer
+    memcpy(&prefix_len, buffer + 96, 8);
+    memcpy(&suffix_len, buffer + 104 + prefix_len, 8);  // Assuming suffix_len is placed after the prefix
+    
+    uint8_t *prefix = buffer + 104;  // The prefix starts after the prefix_len
+    uint8_t *suffix = buffer + 104 + prefix_len;  // The suffix starts after the prefix data
+    uint8_t *out = (buffer + 104 + prefix_len + suffix_len);  // Out is after both prefix and suffix
+    
 
     uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned char local_out[32] = {0};
     unsigned char local_encoded[44] = {0};
     uint64_t local_seed[4];
+
 
     // Pseudo random generator
     CUDA_SHA256_CTX ctx;
@@ -168,7 +220,7 @@ vanity_search(uint8_t *buffer, uint64_t stride)
     cuda_sha256_init(&address_sha);
     cuda_sha256_update(&address_sha, (BYTE *)base, 32);
 
-    for (uint64_t iter = 0; iter < 1000 * 1000 * 1000 * 1000; iter++)
+    for (uint64_t iter = 0; iter < 1000 * 1000 * 1000; iter++)
     {
         // Has someone found a result?
         if (iter % 100 == 0)
@@ -204,6 +256,7 @@ vanity_search(uint8_t *buffer, uint64_t stride)
             alphanumeric[(indices[7] >> 2) % 62],
         };
 
+
         // Calculate and encode public
         CUDA_SHA256_CTX address_sha_local;
         memcpy(&address_sha_local, &address_sha, sizeof(CUDA_SHA256_CTX));
@@ -212,13 +265,17 @@ vanity_search(uint8_t *buffer, uint64_t stride)
         cuda_sha256_final(&address_sha_local, (BYTE *)local_out);
         fd_base58_encode_32(local_out, (unsigned char *)(&local_encoded), d_case_insensitive);
 
-        // Check target
-        if (matches_target((unsigned char *)local_encoded, (unsigned char *)target, target_len))
+        // Check prefix and suffix
+        // printf("Got key: %s\n", local_encoded);
+
+        if (matches_search((unsigned char *)local_encoded, (unsigned char *)prefix, prefix_len, (unsigned char *)suffix, suffix_len))
         {
             // Are we first to write result?
             if (atomicMax(&done, 1) == 0)
             {
                 // seed for CreateAccountWithSeed
+                // printf("Match found! Copying result to out\n");
+
                 memcpy(out, create_account_seed, 16);
             }
 
@@ -228,12 +285,19 @@ vanity_search(uint8_t *buffer, uint64_t stride)
     }
 }
 
-__device__ bool matches_target(unsigned char *a, unsigned char *target, uint64_t n)
+__device__ bool matches_search(unsigned char *a, unsigned char *prefix, uint64_t prefix_len, unsigned char *suffix, uint64_t suffix_len)
 {
-    for (int i = 0; i < n; i++)
+    for (int i = 0; i < prefix_len; i++) 
     {
-        if (a[i] != target[i])
+        if (a[i] != prefix[i])
             return false;
     }
+
+    for (int i = 0; i < suffix_len; i++) 
+    {
+        if (a[prefix_len + i] != suffix[i])
+            return false;
+    }
+
     return true;
 }
