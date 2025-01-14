@@ -138,7 +138,7 @@ fn deploy(args: DeployArgs) {
     let buffer_len = rpc_client.get_account_data(&args.buffer).unwrap().len();
     // I forgot the header len so let's just add 64 for now lol
     let rent = rpc_client
-        .get_minimum_balance_for_rent_exemption(64 + buffer_len)
+        .get_minimum_balance_for_rent_exemption(UpgradeableLoaderState::size_of_program())
         .expect("failed to fetch rent");
 
     // Create account with seed
