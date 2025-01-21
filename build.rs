@@ -14,8 +14,8 @@ fn build_cuda_libs() {
         .file("kernels/base58.cu")
         .file("kernels/sha256.cu")
         .flag("-cudart=static")
-        .flag("-gencode=arch=compute_86,code=sm_86")
-        .flag("-gencode=arch=compute_86,code=compute_86")
+        .flag("-gencode=arch=compute_89,code=sm_89")
+        .flag("-gencode=arch=compute_89,code=compute_89")
         .compile("libvanity.a");
 
     // Add link directory
