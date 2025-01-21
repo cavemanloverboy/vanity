@@ -2,7 +2,7 @@
 
 A _bLaZinGlY fAsT_ tool for grinding vanity addresses on Solana.
 
-> **Note**: This project (+ the readme) was generated with the assistance of AI (Claude).
+> **Note**: This project (+ the readme) was generated with the assistance of AI (Claude) in Cursor.
 
 ## Features
 
