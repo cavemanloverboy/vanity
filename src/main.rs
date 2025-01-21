@@ -1,18 +1,20 @@
 use clap::Parser;
-use logfather::{Level, Logger};
-use num_format::{Locale, ToFormattedString};
-use rand::{distributions::Alphanumeric, Rng};
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
-use sha2::{Digest, Sha256};
+use logfather::{ Level, Logger };
+use num_format::{ Locale, ToFormattedString };
+use rand::{ distributions::Alphanumeric, Rng };
+use rayon::iter::{ IntoParallelIterator, ParallelIterator };
+use sha2::{ Digest, Sha256 };
 use solana_pubkey::Pubkey;
 use solana_rpc_client::rpc_client::RpcClient;
 use solana_sdk::{
-    bpf_loader_upgradeable::{self, get_program_data_address, UpgradeableLoaderState},
-    instruction::{AccountMeta, Instruction},
+    bpf_loader_upgradeable::{ self, get_program_data_address, UpgradeableLoaderState },
+    instruction::{ AccountMeta, Instruction },
     loader_upgradeable_instruction::UpgradeableLoaderInstruction,
     signature::read_keypair_file,
     signer::Signer,
-    system_instruction, system_program, sysvar,
+    system_instruction,
+    system_program,
+    sysvar,
     transaction::Transaction,
 };
 
@@ -20,8 +22,10 @@ use std::{
     array,
     path::PathBuf,
     str::FromStr,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{ AtomicBool, Ordering },
     time::Instant,
+    fs::{ self, File },
+    io::Write,
 };
 
 #[derive(Debug, Parser)]
@@ -126,8 +130,7 @@ fn main() {
 fn deploy(args: DeployArgs) {
     // Load base and payer keypair
     let base_keypair = read_keypair_file(&args.base).expect("failed to read base keypair");
-    let payer_keypair = args
-        .payer
+    let payer_keypair = args.payer
         .as_ref()
         .map(|payer| read_keypair_file(payer).expect("failed to read payer keypair"))
         .unwrap_or(base_keypair.insecure_clone());
@@ -142,7 +145,7 @@ fn deploy(args: DeployArgs) {
     let buffer_len = rpc_client.get_account_data(&args.buffer).unwrap().len();
     // I forgot the header len so let's just add 64 for now lol
     let rent = rpc_client
-        .get_minimum_balance_for_rent_exemption(64 + buffer_len)
+        .get_minimum_balance_for_rent_exemption(UpgradeableLoaderState::size_of_program())
         .expect("failed to fetch rent");
 
     // Create account with seed
@@ -154,7 +157,7 @@ fn deploy(args: DeployArgs) {
         rent,
         64 + buffer_len,
         &base_keypair.pubkey(),
-        &args.seed,
+        &args.seed
     );
     // Transaction
     let blockhash = rpc_client.get_latest_blockhash().unwrap();
@@ -167,12 +170,10 @@ fn deploy(args: DeployArgs) {
         &instructions,
         Some(&payer_keypair.pubkey()),
         &signers,
-        blockhash,
+        blockhash
     );
 
-    let sig = rpc_client
-        .send_and_confirm_transaction(&transaction)
-        .unwrap();
+    let sig = rpc_client.send_and_confirm_transaction(&transaction).unwrap();
     println!("Deployed {target}: {sig}");
 }
 
@@ -184,7 +185,7 @@ pub fn deploy_with_max_program_len_with_seed(
     program_lamports: u64,
     max_data_len: usize,
     base: &Pubkey,
-    seed: &str,
+    seed: &str
 ) -> [Instruction; 2] {
     let programdata_address = get_program_data_address(program_address);
     [
@@ -195,11 +196,11 @@ pub fn deploy_with_max_program_len_with_seed(
             seed,
             program_lamports,
             UpgradeableLoaderState::size_of_program() as u64,
-            &bpf_loader_upgradeable::id(),
+            &bpf_loader_upgradeable::id()
         ),
         Instruction::new_with_bincode(
             bpf_loader_upgradeable::id(),
-            &UpgradeableLoaderInstruction::DeployWithMaxDataLen { max_data_len },
+            &(UpgradeableLoaderInstruction::DeployWithMaxDataLen { max_data_len }),
             vec![
                 AccountMeta::new(*payer_address, true),
                 AccountMeta::new(programdata_address, false),
@@ -208,8 +209,8 @@ pub fn deploy_with_max_program_len_with_seed(
                 AccountMeta::new_readonly(sysvar::rent::id(), false),
                 AccountMeta::new_readonly(sysvar::clock::id(), false),
                 AccountMeta::new_readonly(system_program::id(), false),
-                AccountMeta::new_readonly(*upgrade_authority_address, true),
-            ],
+                AccountMeta::new_readonly(*upgrade_authority_address, true)
+            ]
         ),
     ]
 }
@@ -217,8 +218,8 @@ pub fn deploy_with_max_program_len_with_seed(
 fn grind(mut args: GrindArgs) {
     maybe_update_num_cpus(&mut args.num_cpus);
 
-    let (prefix, suffix)= get_validated_prefix_and_suffix(&args);
-    
+    let (prefix, suffix) = get_validated_prefix_and_suffix(&args);
+
     // Initialize logger with optional logfile
     let mut logger = Logger::new();
     if let Some(ref logfile) = args.logfile {
@@ -239,7 +240,8 @@ fn grind(mut args: GrindArgs) {
     #[cfg(feature = "gpu")]
     let _gpu_threads: Vec<_> = (0..args.num_gpus)
         .map(move |gpu_index| {
-            std::thread::Builder::new()
+            std::thread::Builder
+                ::new()
                 .name(format!("gpu{gpu_index}"))
                 .spawn(move || {
                     logfather::trace!("starting gpu {gpu_index}");
@@ -256,16 +258,18 @@ fn grind(mut args: GrindArgs) {
                         let seed = new_gpu_seed(gpu_index, iteration);
                         let timer = Instant::now();
                         unsafe {
-                            vanity_round(gpu_index, 
-                                seed.as_ref().as_ptr(), 
-                                args.base.to_bytes().as_ptr(), 
-                                args.owner.to_bytes().as_ptr(), 
+                            vanity_round(
+                                gpu_index,
+                                seed.as_ref().as_ptr(),
+                                args.base.to_bytes().as_ptr(),
+                                args.owner.to_bytes().as_ptr(),
                                 prefix.as_ptr(),
                                 prefix.len() as u64,
                                 suffix.as_ptr(),
                                 suffix.len() as u64,
-                                  out.as_mut_ptr(), 
-                                  args.case_insensitive);
+                                out.as_mut_ptr(),
+                                args.case_insensitive
+                            );
                         }
                         let time_sec = timer.elapsed().as_secs_f64();
 
@@ -277,23 +281,96 @@ fn grind(mut args: GrindArgs) {
                             .finalize()
                             .into();
                         let out_str = fd_bs58::encode_32(reconstructed);
-                        let out_str_check = maybe_bs58_aware_lowercase(&out_str, args.case_insensitive);
+                        let out_str_check = maybe_bs58_aware_lowercase(
+                            &out_str,
+                            args.case_insensitive
+                        );
                         let count = u64::from_le_bytes(array::from_fn(|i| out[16 + i]));
                         logfather::info!(
                             "{}.. found in {:.3} seconds on gpu {gpu_index:>3}; {:>13} iters; {:>12} iters/sec",
                             &out_str[..(prefix.len() + suffix.len() + 4).min(40)],
                             time_sec,
                             count.to_formatted_string(&Locale::en),
-                            ((count as f64 / time_sec) as u64).to_formatted_string(&Locale::en)
+                            (((count as f64) / time_sec) as u64).to_formatted_string(&Locale::en)
                         );
-                        
-                        
 
-                        if out_str_check.starts_with(prefix)  && out_str_check.ends_with(suffix){
-                            logfather::info!("out seed = {out:?} -> {}", core::str::from_utf8(&out[..16]).unwrap());
-                            EXIT.store(true, Ordering::SeqCst);
-                            logfather::trace!("gpu thread {gpu_index} exiting");
-                            return;
+                        if out_str_check.starts_with(prefix) && out_str_check.ends_with(suffix) {
+                            logfather::info!(
+                                "out seed = {out:?} -> {}",
+                                core::str::from_utf8(&out[..16]).unwrap_or("Invalid UTF-8")
+                            );
+
+                            let output_dir = PathBuf::from("/mnt/f/coding/vanity/keys");
+                            logfather::debug!(
+                                "Ensuring output directory exists: {}",
+                                output_dir.display()
+                            );
+
+                            // Ensure the output directory exists
+                            if let Err(err) = fs::create_dir_all(&output_dir) {
+                                logfather::error!("Failed to create output directory: {}", err);
+                                return;
+                            } else {
+                                logfather::info!(
+                                    "Output directory exists or was created: {}",
+                                    output_dir.display()
+                                );
+                            }
+
+                            // Create the full path to the output file
+                            let output_file_path = output_dir.join(format!("{}.txt", out_str));
+                            logfather::debug!(
+                                "Generated output file path: {}",
+                                output_file_path.display()
+                            );
+
+                            // Create the output file
+                            let mut file = match File::create(&output_file_path) {
+                                Ok(file) => file,
+                                Err(err) => {
+                                    logfather::error!(
+                                        "Error opening file {}: {}",
+                                        output_file_path.display(),
+                                        err
+                                    );
+                                    return;
+                                }
+                            };
+
+                            logfather::debug!(
+                                "Opened file for writing: {}",
+                                output_file_path.display()
+                            );
+
+                            // Write `out_str` and `seed` to the file
+                            match
+                                write!(
+                                    file,
+                                    "{} -> {out:?} [{}]",
+                                    out_str,
+                                    core::str::from_utf8(&out[..16]).unwrap_or("Invalid UTF-8")
+                                )
+                            {
+                                Ok(_) => {
+                                    logfather::info!(
+                                        "Successfully saved output to {}",
+                                        output_file_path.display()
+                                    );
+                                    EXIT.store(true, Ordering::SeqCst);
+                                    logfather::trace!("gpu thread {} exiting", gpu_index);
+                                    return;
+                                }
+                                Err(err) => {
+                                    logfather::error!(
+                                        "Error writing to file {}: {}",
+                                        output_file_path.display(),
+                                        err
+                                    );
+                                    return;
+                                }
+                            }
+                        } else {
+                            logfather::debug!("out_str_check does not match prefix or suffix");
                         }
                     }
                 })
@@ -326,18 +403,66 @@ fn grind(mut args: GrindArgs) {
             count += 1;
 
             // Did cpu find prefix and suffix?
-            if out_str_check.starts_with(prefix) && out_str_check.ends_with(suffix) {
+            if out_str_check.starts_with(prefix) && pubkey.ends_with(suffix) {
                 let time_secs = timer.elapsed().as_secs_f64();
                 logfather::info!(
                     "cpu {i} found key: {pubkey}; {seed:?} -> {} in {:.3}s; {} attempts; {} attempts per second",
                     core::str::from_utf8(&seed).unwrap(),
                     time_secs,
                     count.to_formatted_string(&Locale::en),
-                    ((count as f64 / time_secs) as u64).to_formatted_string(&Locale::en)
+                    (((count as f64) / time_secs) as u64).to_formatted_string(&Locale::en)
                 );
 
-                EXIT.store(true, Ordering::Release);
-                break;
+                let output_dir = PathBuf::from("/mnt/f/coding/vanity/keys");
+                logfather::debug!("Ensuring output directory exists: {}", output_dir.display());
+                if let Err(err) = fs::create_dir_all(&output_dir) {
+                    logfather::error!("Failed to create output directory: {}", err);
+                    return;
+                } else {
+                    logfather::info!(
+                        "Output directory exists or was created: {}",
+                        output_dir.display()
+                    );
+                }
+                let output_file_path = output_dir.join(format!("{}.txt", pubkey));
+                logfather::debug!("Generated output file path: {}", output_file_path.display());
+                let mut file = match File::create(&output_file_path) {
+                    Ok(file) => file,
+                    Err(err) => {
+                        logfather::error!(
+                            "Error opening file {}: {}",
+                            output_file_path.display(),
+                            err
+                        );
+                        return;
+                    }
+                };
+                logfather::debug!("Opened file for writing: {}", output_file_path.display());
+                match
+                    write!(
+                        file,
+                        "{} -> {seed:?} [{}]",
+                        pubkey,
+                        core::str::from_utf8(&seed).unwrap()
+                    )
+                {
+                    Ok(_) => {
+                        logfather::info!(
+                            "Successfully saved output to {}",
+                            output_file_path.display()
+                        );
+                        EXIT.store(true, Ordering::SeqCst);
+                        return;
+                    }
+                    Err(err) => {
+                        logfather::error!(
+                            "Error writing to file {}: {}",
+                            output_file_path.display(),
+                            err
+                        );
+                        return;
+                    }
+                }
             }
         }
     });
@@ -349,20 +474,12 @@ fn get_validated_prefix_and_suffix(args: &GrindArgs) -> (&'static str, &'static 
 
     // Validate prefix (i.e. does it include 0, O, I, l)
     for c in args.prefix.chars() {
-        assert!(
-            BS58_CHARS.contains(c),
-            "your prefix contains invalid bs58: {}",
-            c
-        );
+        assert!(BS58_CHARS.contains(c), "your prefix contains invalid bs58: {}", c);
     }
 
     // Validate suffix (i.e. does it include 0, O, I, l)
     for c in args.suffix.chars() {
-        assert!(
-            BS58_CHARS.contains(c),
-            "your suffix contains invalid bs58: {}",
-            c
-        );
+        assert!(BS58_CHARS.contains(c), "your suffix contains invalid bs58: {}", c);
     }
 
     // bs58-aware lowercase conversion for both prefix and suffix
@@ -372,28 +489,20 @@ fn get_validated_prefix_and_suffix(args: &GrindArgs) -> (&'static str, &'static 
     (prefix.leak(), suffix.leak())
 }
 
-
 fn maybe_bs58_aware_lowercase(item: &str, case_insensitive: bool) -> String {
     // L is only char that shouldn't be converted to lowercase in case-insensitivity case
     const LOWERCASE_EXCEPTIONS: &str = "L";
 
     if case_insensitive {
-        item
-            .chars()
+        item.chars()
             .map(|c| {
-                if LOWERCASE_EXCEPTIONS.contains(c) {
-                    c
-                } else {
-                    c.to_ascii_lowercase()
-                }
+                if LOWERCASE_EXCEPTIONS.contains(c) { c } else { c.to_ascii_lowercase() }
             })
             .collect::<String>()
     } else {
         item.to_string()
     }
 }
-
-
 
 extern "C" {
     pub fn vanity_round(
@@ -406,7 +515,7 @@ extern "C" {
         suffix: *const u8,
         suffix_len: u64,
         out: *mut u8,
-        case_insensitive: bool,
+        case_insensitive: bool
     );
 }
 
