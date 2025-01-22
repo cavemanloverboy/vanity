@@ -487,6 +487,7 @@ fn matches_vanity_key(
             .chars()
             .map(|c| {
                 match c {
+                    // Only use valid base58 characters
                     '4' => 'a',
                     '3' => 'e',
                     '7' => 't',
@@ -494,6 +495,7 @@ fn matches_vanity_key(
                     '5' => 's',
                     '6' => 'g',
                     '8' => 'b',
+                    '2' => 'z',
                     'A' | 'a' => 'a',
                     'E' | 'e' => 'e',
                     'T' | 't' => 't',
@@ -501,6 +503,7 @@ fn matches_vanity_key(
                     'S' | 's' => 's',
                     'G' | 'g' => 'g',
                     'B' | 'b' => 'b',
+                    'Z' | 'z' => 'z',
                     _ => c,
                 }
             })
@@ -509,5 +512,5 @@ fn matches_vanity_key(
         check_str
     };
 
-    check_str.starts_with(prefix) && pubkey_str.ends_with(suffix) // Changed to check_str for both
+    check_str.starts_with(prefix) && check_str.ends_with(suffix)
 }

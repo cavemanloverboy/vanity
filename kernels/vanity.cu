@@ -319,6 +319,9 @@ __device__ bool chars_match_leet(char a, char b)
     case 'b':
     case 'B':
         return b == '8';
+    case 'z':
+    case 'Z':
+        return b == '2';
     }
 
     switch (b)
@@ -337,6 +340,8 @@ __device__ bool chars_match_leet(char a, char b)
         return a == 'g' || a == 'G';
     case '8':
         return a == 'b' || a == 'B';
+    case '2':
+        return a == 'z' || a == 'Z';
     }
 
     return false;
