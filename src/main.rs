@@ -290,7 +290,7 @@ fn grind(mut args: GrindArgs) {
                         let count = u64::from_le_bytes(array::from_fn(|i| out[16 + i]));
                         logfather::info!(
                             "{}.. found in {:.3} seconds on gpu {gpu_index:>3}; {:>13} iters; {:>12} iters/sec",
-                            &out_str[..(prefix.len() + suffix.len() + 4).min(40)],
+                            &pubkey[..(prefix.len() + suffix.len() + 4).min(40)],
                             time_sec,
                             count.to_formatted_string(&Locale::en),
                             (((count as f64) / time_sec) as u64).to_formatted_string(&Locale::en)
@@ -319,7 +319,7 @@ fn grind(mut args: GrindArgs) {
                             logfather::trace!("gpu thread {gpu_index} exiting");
                             return;
                         } else {
-                            logfather::debug!("out_str_check does not match prefix or suffix");
+                            logfather::debug!("pubkey does not match prefix or suffix");
                         }
                     }
                 })
