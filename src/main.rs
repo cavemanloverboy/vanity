@@ -311,7 +311,7 @@ fn grind(mut args: GrindArgs) {
                             );
 
                             let output_dir = PathBuf::from("/mnt/f/coding/vanity/keys");
-                            if let Err(err) = save_vanity_key(&out_str, &out[..16], &output_dir) {
+                            if let Err(err) = save_vanity_key(&pubkey, &out[..16], &output_dir) {
                                 logfather::error!("{}", err);
                                 return;
                             }
