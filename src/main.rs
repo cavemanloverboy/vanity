@@ -494,6 +494,13 @@ fn matches_vanity_key(
                     '5' => 's',
                     '6' => 'g',
                     '8' => 'b',
+                    'A' | 'a' => 'a',
+                    'E' | 'e' => 'e',
+                    'T' | 't' => 't',
+                    'I' | 'i' | 'L' | 'l' => 'i',
+                    'S' | 's' => 's',
+                    'G' | 'g' => 'g',
+                    'B' | 'b' => 'b',
                     _ => c,
                 }
             })
@@ -502,5 +509,5 @@ fn matches_vanity_key(
         check_str
     };
 
-    check_str.starts_with(prefix) && pubkey_str.ends_with(suffix) // back to check_str
+    check_str.starts_with(prefix) && pubkey_str.ends_with(suffix) // Changed to check_str for both
 }
