@@ -279,17 +279,14 @@ fn grind(mut args: GrindArgs) {
                         let time_sec = timer.elapsed().as_secs_f64();
 
                         // Reconstruct solution
-                        let reconstructed: [u8; 32] = Sha256::new()
+                        let pubkey_bytes: [u8; 32] = Sha256::new()
                             .chain_update(&args.base)
                             .chain_update(&out[..16])
                             .chain_update(&args.owner)
                             .finalize()
                             .into();
-                        let out_str = fd_bs58::encode_32(reconstructed);
-                        let out_str_check = maybe_bs58_aware_lowercase(
-                            &out_str,
-                            args.case_insensitive
-                        );
+                        let pubkey = fd_bs58::encode_32(pubkey_bytes);
+
                         let count = u64::from_le_bytes(array::from_fn(|i| out[16 + i]));
                         logfather::info!(
                             "{}.. found in {:.3} seconds on gpu {gpu_index:>3}; {:>13} iters; {:>12} iters/sec",
@@ -301,7 +298,7 @@ fn grind(mut args: GrindArgs) {
 
                         if
                             matches_vanity_key(
-                                &out_str,
+                                &pubkey,
                                 prefix,
                                 suffix,
                                 args.case_insensitive,
@@ -350,19 +347,10 @@ fn grind(mut args: GrindArgs) {
                 .finalize()
                 .into();
             let pubkey = fd_bs58::encode_32(pubkey_bytes);
-            let out_str_check = maybe_bs58_aware_lowercase(&pubkey, args.case_insensitive);
 
             count += 1;
 
-            if
-                matches_vanity_key(
-                    &out_str_check,
-                    prefix,
-                    suffix,
-                    args.case_insensitive,
-                    args.leet_speak
-                )
-            {
+            if matches_vanity_key(&pubkey, prefix, suffix, args.case_insensitive, args.leet_speak) {
                 let time_secs = timer.elapsed().as_secs_f64();
                 logfather::info!(
                     "cpu {i} found key: {pubkey}; {seed:?} -> {} in {:.3}s; {} attempts; {} attempts per second",
@@ -514,5 +502,5 @@ fn matches_vanity_key(
         check_str
     };
 
-    check_str.starts_with(prefix) && check_str.ends_with(suffix)
+    check_str.starts_with(prefix) && pubkey_str.ends_with(suffix) // back to check_str
 }
