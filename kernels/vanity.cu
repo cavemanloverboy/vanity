@@ -6,6 +6,7 @@
 __device__ int done = 0;
 __device__ unsigned long long count = 0;
 __device__ bool d_case_insensitive = false;
+__device__ bool d_leet_speak = false;
 
 // TODO:
 // 1) Should maybe write a macro for the err handling
@@ -20,7 +21,8 @@ extern "C" void vanity_round(
     char *suffix,
     uint64_t suffix_len,
     uint8_t *out,
-    bool case_insensitive)
+    bool case_insensitive,
+    bool leet_speak)
 {
     int deviceCount;
     cudaGetDeviceCount(&deviceCount);
@@ -31,11 +33,9 @@ extern "C" void vanity_round(
         return;
     }
 
-
     // Set device and initialize it
     cudaSetDevice(id);
     gpu_init(id);
-
 
     // Allocate device buffer for seed, base, owner, out, prefix len, prefix, suffix_len, suffix
     uint8_t *d_buffer;
@@ -88,7 +88,7 @@ extern "C" void vanity_round(
         cudaFree(d_buffer);
         return;
     }
-    
+
     // Copy prefix to device memory
     err = cudaMemcpy(d_buffer + 104, prefix, prefix_len, cudaMemcpyHostToDevice);
     if (err != cudaSuccess)
@@ -97,7 +97,7 @@ extern "C" void vanity_round(
         cudaFree(d_buffer);
         return;
     }
-    
+
     // Copy suffix length to device memory
     err = cudaMemcpy(d_buffer + 104 + prefix_len, &suffix_len, 8, cudaMemcpyHostToDevice);
     if (err != cudaSuccess)
@@ -106,7 +106,7 @@ extern "C" void vanity_round(
         cudaFree(d_buffer);
         return;
     }
-    
+
     // Copy suffix to device memory
     err = cudaMemcpy(d_buffer + 112 + prefix_len, suffix, suffix_len, cudaMemcpyHostToDevice);
     if (err != cudaSuccess)
@@ -122,7 +122,7 @@ extern "C" void vanity_round(
         cudaFree(d_buffer);
         return;
     }
-    
+
     // Reset tracker and counter using cudaMemcpyToSymbol
     int zero = 0;
     unsigned long long zero_ull = 0;
@@ -137,6 +137,15 @@ extern "C" void vanity_round(
     if (err != cudaSuccess)
     {
         printf("CUDA memcpy to symbol error (count): %s\n", cudaGetErrorString(err));
+        cudaFree(d_buffer);
+        return;
+    }
+
+    // Copy leet_speak setting to device
+    err = cudaMemcpyToSymbol(d_leet_speak, &leet_speak, sizeof(bool));
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memcpy to symbol error (leet_speak): %s\n", cudaGetErrorString(err));
         cudaFree(d_buffer);
         return;
     }
@@ -175,11 +184,8 @@ extern "C" void vanity_round(
         return;
     }
 
-
-
     // Free pointers
     cudaFree(d_buffer);
-
 }
 
 __device__ uint8_t const alphanumeric[63] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -193,21 +199,19 @@ vanity_search(uint8_t *buffer, uint64_t stride)
     uint8_t *owner = buffer + 64;
     uint64_t prefix_len;
     uint64_t suffix_len;
-    
+
     // Assuming the prefix and suffix lengths are already in the buffer
     memcpy(&prefix_len, buffer + 96, 8);
-    memcpy(&suffix_len, buffer + 104 + prefix_len, 8);  // Assuming suffix_len is placed after the prefix
-    
-    uint8_t *prefix = buffer + 104;  // The prefix starts after the prefix_len
-    uint8_t *suffix = buffer + 104 + prefix_len;  // The suffix starts after the prefix data
-    uint8_t *out = (buffer + 104 + prefix_len + suffix_len);  // Out is after both prefix and suffix
-    
+    memcpy(&suffix_len, buffer + 104 + prefix_len, 8); // Assuming suffix_len is placed after the prefix
+
+    uint8_t *prefix = buffer + 104;                          // The prefix starts after the prefix_len
+    uint8_t *suffix = buffer + 104 + prefix_len;             // The suffix starts after the prefix data
+    uint8_t *out = (buffer + 104 + prefix_len + suffix_len); // Out is after both prefix and suffix
 
     uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned char local_out[32] = {0};
     unsigned char local_encoded[44] = {0};
     uint64_t local_seed[4];
-
 
     // Pseudo random generator
     CUDA_SHA256_CTX ctx;
@@ -256,7 +260,6 @@ vanity_search(uint8_t *buffer, uint64_t stride)
             alphanumeric[(indices[7] >> 2) % 62],
         };
 
-
         // Calculate and encode public
         CUDA_SHA256_CTX address_sha_local;
         memcpy(&address_sha_local, &address_sha, sizeof(CUDA_SHA256_CTX));
@@ -285,18 +288,88 @@ vanity_search(uint8_t *buffer, uint64_t stride)
     }
 }
 
-__device__ bool matches_search(unsigned char *a, unsigned char *prefix, uint64_t prefix_len, unsigned char *suffix, uint64_t suffix_len)
+__device__ bool chars_match_leet(char a, char b)
 {
-    for (int i = 0; i < prefix_len; i++) 
+    if (a == b)
+        return true;
+
+    switch (a)
     {
-        if (a[i] != prefix[i])
-            return false;
+    case 'a':
+    case 'A':
+        return b == '4';
+    case 'e':
+    case 'E':
+        return b == '3';
+    case 't':
+    case 'T':
+        return b == '7';
+    case 'l':
+    case 'L':
+        return b == '1';
+    case 'i':
+    case 'I':
+        return b == '1';
+    case 's':
+    case 'S':
+        return b == '5';
+    case 'g':
+    case 'G':
+        return b == '6';
+    case 'b':
+    case 'B':
+        return b == '8';
     }
 
-    for (int i = 0; i < suffix_len; i++) 
+    switch (b)
     {
-        if (a[prefix_len + i] != suffix[i])
+    case '4':
+        return a == 'a' || a == 'A';
+    case '3':
+        return a == 'e' || a == 'E';
+    case '7':
+        return a == 't' || a == 'T';
+    case '1':
+        return a == 'l' || a == 'L' || a == 'i' || a == 'I';
+    case '5':
+        return a == 's' || a == 'S';
+    case '6':
+        return a == 'g' || a == 'G';
+    case '8':
+        return a == 'b' || a == 'B';
+    }
+
+    return false;
+}
+
+__device__ bool matches_search(unsigned char *a, unsigned char *prefix, uint64_t prefix_len, unsigned char *suffix, uint64_t suffix_len)
+{
+    // Check prefix
+    for (int i = 0; i < prefix_len; i++)
+    {
+        if (d_leet_speak)
+        {
+            if (!chars_match_leet(prefix[i], a[i]))
+                return false;
+        }
+        else if (a[i] != prefix[i])
+        {
             return false;
+        }
+    }
+
+    // Check suffix
+    for (int i = 0; i < suffix_len; i++)
+    {
+        if (d_leet_speak)
+        {
+            if (!chars_match_leet(suffix[i], a[44 - suffix_len + i]))
+                return false;
+        }
+        else if (a[44 - suffix_len + i] != suffix[i])
+        {
+            return false;
+        }
     }
 
     return true;

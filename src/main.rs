@@ -56,6 +56,10 @@ pub struct GrindArgs {
     #[clap(long, default_value_t = false)]
     pub case_insensitive: bool,
 
+    /// Whether to match leet speak variants (e.g. a=4, e=3, etc)
+    #[clap(long, default_value_t = false)]
+    pub leet_speak: bool,
+
     /// Optional log file
     #[clap(long)]
     pub logfile: Option<String>,
@@ -268,7 +272,8 @@ fn grind(mut args: GrindArgs) {
                                 suffix.as_ptr(),
                                 suffix.len() as u64,
                                 out.as_mut_ptr(),
-                                args.case_insensitive
+                                args.case_insensitive,
+                                args.leet_speak
                             );
                         }
                         let time_sec = timer.elapsed().as_secs_f64();
@@ -294,81 +299,28 @@ fn grind(mut args: GrindArgs) {
                             (((count as f64) / time_sec) as u64).to_formatted_string(&Locale::en)
                         );
 
-                        if out_str_check.starts_with(prefix) && out_str_check.ends_with(suffix) {
+                        if
+                            matches_vanity_key(
+                                &out_str,
+                                prefix,
+                                suffix,
+                                args.case_insensitive,
+                                args.leet_speak
+                            )
+                        {
                             logfather::info!(
                                 "out seed = {out:?} -> {}",
                                 core::str::from_utf8(&out[..16]).unwrap_or("Invalid UTF-8")
                             );
 
                             let output_dir = PathBuf::from("/mnt/f/coding/vanity/keys");
-                            logfather::debug!(
-                                "Ensuring output directory exists: {}",
-                                output_dir.display()
-                            );
-
-                            // Ensure the output directory exists
-                            if let Err(err) = fs::create_dir_all(&output_dir) {
-                                logfather::error!("Failed to create output directory: {}", err);
+                            if let Err(err) = save_vanity_key(&out_str, &out[..16], &output_dir) {
+                                logfather::error!("{}", err);
                                 return;
-                            } else {
-                                logfather::info!(
-                                    "Output directory exists or was created: {}",
-                                    output_dir.display()
-                                );
                             }
-
-                            // Create the full path to the output file
-                            let output_file_path = output_dir.join(format!("{}.txt", out_str));
-                            logfather::debug!(
-                                "Generated output file path: {}",
-                                output_file_path.display()
-                            );
-
-                            // Create the output file
-                            let mut file = match File::create(&output_file_path) {
-                                Ok(file) => file,
-                                Err(err) => {
-                                    logfather::error!(
-                                        "Error opening file {}: {}",
-                                        output_file_path.display(),
-                                        err
-                                    );
-                                    return;
-                                }
-                            };
-
-                            logfather::debug!(
-                                "Opened file for writing: {}",
-                                output_file_path.display()
-                            );
-
-                            // Write `out_str` and `seed` to the file
-                            match
-                                write!(
-                                    file,
-                                    "{} -> {out:?} [{}]",
-                                    out_str,
-                                    core::str::from_utf8(&out[..16]).unwrap_or("Invalid UTF-8")
-                                )
-                            {
-                                Ok(_) => {
-                                    logfather::info!(
-                                        "Successfully saved output to {}",
-                                        output_file_path.display()
-                                    );
-                                    EXIT.store(true, Ordering::SeqCst);
-                                    logfather::trace!("gpu thread {} exiting", gpu_index);
-                                    return;
-                                }
-                                Err(err) => {
-                                    logfather::error!(
-                                        "Error writing to file {}: {}",
-                                        output_file_path.display(),
-                                        err
-                                    );
-                                    return;
-                                }
-                            }
+                            EXIT.store(true, Ordering::SeqCst);
+                            logfather::trace!("gpu thread {gpu_index} exiting");
+                            return;
                         } else {
                             logfather::debug!("out_str_check does not match prefix or suffix");
                         }
@@ -402,8 +354,15 @@ fn grind(mut args: GrindArgs) {
 
             count += 1;
 
-            // Did cpu find prefix and suffix?
-            if out_str_check.starts_with(prefix) && pubkey.ends_with(suffix) {
+            if
+                matches_vanity_key(
+                    &out_str_check,
+                    prefix,
+                    suffix,
+                    args.case_insensitive,
+                    args.leet_speak
+                )
+            {
                 let time_secs = timer.elapsed().as_secs_f64();
                 logfather::info!(
                     "cpu {i} found key: {pubkey}; {seed:?} -> {} in {:.3}s; {} attempts; {} attempts per second",
@@ -414,55 +373,12 @@ fn grind(mut args: GrindArgs) {
                 );
 
                 let output_dir = PathBuf::from("/mnt/f/coding/vanity/keys");
-                logfather::debug!("Ensuring output directory exists: {}", output_dir.display());
-                if let Err(err) = fs::create_dir_all(&output_dir) {
-                    logfather::error!("Failed to create output directory: {}", err);
+                if let Err(err) = save_vanity_key(&pubkey, &seed, &output_dir) {
+                    logfather::error!("{}", err);
                     return;
-                } else {
-                    logfather::info!(
-                        "Output directory exists or was created: {}",
-                        output_dir.display()
-                    );
                 }
-                let output_file_path = output_dir.join(format!("{}.txt", pubkey));
-                logfather::debug!("Generated output file path: {}", output_file_path.display());
-                let mut file = match File::create(&output_file_path) {
-                    Ok(file) => file,
-                    Err(err) => {
-                        logfather::error!(
-                            "Error opening file {}: {}",
-                            output_file_path.display(),
-                            err
-                        );
-                        return;
-                    }
-                };
-                logfather::debug!("Opened file for writing: {}", output_file_path.display());
-                match
-                    write!(
-                        file,
-                        "{} -> {seed:?} [{}]",
-                        pubkey,
-                        core::str::from_utf8(&seed).unwrap()
-                    )
-                {
-                    Ok(_) => {
-                        logfather::info!(
-                            "Successfully saved output to {}",
-                            output_file_path.display()
-                        );
-                        EXIT.store(true, Ordering::SeqCst);
-                        return;
-                    }
-                    Err(err) => {
-                        logfather::error!(
-                            "Error writing to file {}: {}",
-                            output_file_path.display(),
-                            err
-                        );
-                        return;
-                    }
-                }
+                EXIT.store(true, Ordering::SeqCst);
+                return;
             }
         }
     });
@@ -515,7 +431,8 @@ extern "C" {
         suffix: *const u8,
         suffix_len: u64,
         out: *mut u8,
-        case_insensitive: bool
+        case_insensitive: bool,
+        leet_speak: bool
     );
 }
 
@@ -537,4 +454,65 @@ fn maybe_update_num_cpus(num_cpus: &mut u32) {
     if *num_cpus == 0 {
         *num_cpus = rayon::current_num_threads() as u32;
     }
+}
+
+fn save_vanity_key(pubkey: &str, seed: &[u8], output_dir: &PathBuf) -> Result<(), String> {
+    logfather::debug!("Ensuring output directory exists: {}", output_dir.display());
+
+    if let Err(err) = fs::create_dir_all(output_dir) {
+        return Err(format!("Failed to create output directory: {}", err));
+    }
+
+    let output_file_path = output_dir.join(format!("{}.txt", pubkey));
+    logfather::debug!("Generated output file path: {}", output_file_path.display());
+
+    let mut file = File::create(&output_file_path).map_err(|err|
+        format!("Error opening file {}: {}", output_file_path.display(), err)
+    )?;
+
+    logfather::debug!("Opened file for writing: {}", output_file_path.display());
+
+    write!(
+        file,
+        "{} -> {:?} [{}]",
+        pubkey,
+        seed,
+        core::str::from_utf8(seed).unwrap_or("Invalid UTF-8")
+    ).map_err(|err| format!("Error writing to file {}: {}", output_file_path.display(), err))?;
+
+    logfather::info!("Successfully saved output to {}", output_file_path.display());
+    Ok(())
+}
+
+fn matches_vanity_key(
+    pubkey_str: &str,
+    prefix: &str,
+    suffix: &str,
+    case_insensitive: bool,
+    leet_speak: bool
+) -> bool {
+    let check_str = maybe_bs58_aware_lowercase(pubkey_str, case_insensitive);
+
+    // Apply leet speak transformations if enabled
+    let check_str = if leet_speak {
+        check_str
+            .chars()
+            .map(|c| {
+                match c {
+                    '4' => 'a',
+                    '3' => 'e',
+                    '7' => 't',
+                    '1' => 'i', // or 'l'
+                    '5' => 's',
+                    '6' => 'g',
+                    '8' => 'b',
+                    _ => c,
+                }
+            })
+            .collect::<String>()
+    } else {
+        check_str
+    };
+
+    check_str.starts_with(prefix) && check_str.ends_with(suffix)
 }
