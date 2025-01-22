@@ -9,6 +9,18 @@ __device__ bool d_prefix_case_insensitive = false;
 __device__ bool d_suffix_case_insensitive = false;
 __device__ bool d_leet_speak = false;
 
+__device__ char to_lowercase(char c)
+{
+    if (c >= 'A' && c <= 'Z')
+    {
+        // Special case for 'L' in bs58
+        if (c == 'L')
+            return c;
+        return c + ('a' - 'A');
+    }
+    return c;
+}
+
 // TODO:
 // 1) Should maybe write a macro for the err handling
 // 2) Theoretically possible to reuse device reallocs but it's only one per round so it's kind of ok
@@ -391,16 +403,4 @@ __device__ bool matches_search(unsigned char *a, unsigned char *prefix, uint64_t
     }
 
     return true;
-}
-
-__device__ char to_lowercase(char c)
-{
-    if (c >= 'A' && c <= 'Z')
-    {
-        // Special case for 'L' in bs58
-        if (c == 'L')
-            return c;
-        return c + ('a' - 'A');
-    }
-    return c;
 }

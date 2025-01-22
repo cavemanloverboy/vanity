@@ -8,5 +8,6 @@ extern "C" void vanity_round(int gpus, uint8_t *seed, uint8_t *base, uint8_t *ow
 __global__ void vanity_search(uint8_t *buffer, uint64_t stride);
 __device__ bool matches_search(unsigned char *a, unsigned char *prefix, uint64_t prefix_len, unsigned char *suffix, uint64_t suffix_len);
 __device__ bool chars_match_leet(char a, char b);
+__device__ char to_lowercase(char c);
 
 #endif
