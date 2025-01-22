@@ -392,3 +392,15 @@ __device__ bool matches_search(unsigned char *a, unsigned char *prefix, uint64_t
 
     return true;
 }
+
+__device__ char to_lowercase(char c)
+{
+    if (c >= 'A' && c <= 'Z')
+    {
+        // Special case for 'L' in bs58
+        if (c == 'L')
+            return c;
+        return c + ('a' - 'A');
+    }
+    return c;
+}
