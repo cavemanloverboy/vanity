@@ -52,9 +52,13 @@ pub struct GrindArgs {
     #[clap(long)]
     pub suffix: String,
 
-    /// Whether user cares about the case of the pubkey
+    /// Whether user cares about the case of the prefix
     #[clap(long, default_value_t = false)]
-    pub case_insensitive: bool,
+    pub prefix_case_insensitive: bool,
+
+    /// Whether user cares about the case of the suffix
+    #[clap(long, default_value_t = false)]
+    pub suffix_case_insensitive: bool,
 
     /// Whether to match leet speak variants (e.g. a=4, e=3, etc)
     #[clap(long, default_value_t = false)]
@@ -272,7 +276,8 @@ fn grind(mut args: GrindArgs) {
                                 suffix.as_ptr(),
                                 suffix.len() as u64,
                                 out.as_mut_ptr(),
-                                args.case_insensitive,
+                                args.prefix_case_insensitive,
+                                args.suffix_case_insensitive,
                                 args.leet_speak
                             );
                         }
@@ -286,10 +291,6 @@ fn grind(mut args: GrindArgs) {
                             .finalize()
                             .into();
                         let out_str = fd_bs58::encode_32(reconstructed);
-                        let out_str_check = maybe_bs58_aware_lowercase(
-                            &out_str,
-                            args.case_insensitive
-                        );
                         let count = u64::from_le_bytes(array::from_fn(|i| out[16 + i]));
                         logfather::info!(
                             "{}.. found in {:.3} seconds on gpu {gpu_index:>3}; {:>13} iters; {:>12} iters/sec",
@@ -304,7 +305,8 @@ fn grind(mut args: GrindArgs) {
                                 &out_str,
                                 prefix,
                                 suffix,
-                                args.case_insensitive,
+                                args.prefix_case_insensitive,
+                                args.suffix_case_insensitive,
                                 args.leet_speak
                             )
                         {
@@ -350,16 +352,16 @@ fn grind(mut args: GrindArgs) {
                 .finalize()
                 .into();
             let pubkey = fd_bs58::encode_32(pubkey_bytes);
-            let out_str_check = maybe_bs58_aware_lowercase(&pubkey, args.case_insensitive);
 
             count += 1;
 
             if
                 matches_vanity_key(
-                    &out_str_check,
+                    &pubkey,
                     prefix,
                     suffix,
-                    args.case_insensitive,
+                    args.prefix_case_insensitive,
+                    args.suffix_case_insensitive,
                     args.leet_speak
                 )
             {
@@ -399,8 +401,8 @@ fn get_validated_prefix_and_suffix(args: &GrindArgs) -> (&'static str, &'static 
     }
 
     // bs58-aware lowercase conversion for both prefix and suffix
-    let prefix = maybe_bs58_aware_lowercase(&args.prefix, args.case_insensitive);
-    let suffix = maybe_bs58_aware_lowercase(&args.suffix, args.case_insensitive);
+    let prefix = maybe_bs58_aware_lowercase(&args.prefix, args.prefix_case_insensitive);
+    let suffix = maybe_bs58_aware_lowercase(&args.suffix, args.suffix_case_insensitive);
 
     (prefix.leak(), suffix.leak())
 }
@@ -431,7 +433,8 @@ extern "C" {
         suffix: *const u8,
         suffix_len: u64,
         out: *mut u8,
-        case_insensitive: bool,
+        prefix_case_insensitive: bool,
+        suffix_case_insensitive: bool,
         leet_speak: bool
     );
 }
@@ -488,31 +491,11 @@ fn matches_vanity_key(
     pubkey_str: &str,
     prefix: &str,
     suffix: &str,
-    case_insensitive: bool,
+    prefix_case_insensitive: bool,
+    suffix_case_insensitive: bool,
     leet_speak: bool
 ) -> bool {
-    let check_str = maybe_bs58_aware_lowercase(pubkey_str, case_insensitive);
-
-    // Apply leet speak transformations if enabled
-    let check_str = if leet_speak {
-        check_str
-            .chars()
-            .map(|c| {
-                match c {
-                    '4' => 'a',
-                    '3' => 'e',
-                    '7' => 't',
-                    '1' => 'i', // or 'l'
-                    '5' => 's',
-                    '6' => 'g',
-                    '8' => 'b',
-                    _ => c,
-                }
-            })
-            .collect::<String>()
-    } else {
-        check_str
-    };
-
-    check_str.starts_with(prefix) && check_str.ends_with(suffix)
+    // The GPU has already done all the checks for us
+    // We just need to verify the prefix and suffix directly
+    pubkey_str.starts_with(prefix) && pubkey_str.ends_with(suffix)
 }

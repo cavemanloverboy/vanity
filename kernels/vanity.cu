@@ -5,7 +5,8 @@
 
 __device__ int done = 0;
 __device__ unsigned long long count = 0;
-__device__ bool d_case_insensitive = false;
+__device__ bool d_prefix_case_insensitive = false;
+__device__ bool d_suffix_case_insensitive = false;
 __device__ bool d_leet_speak = false;
 
 // TODO:
@@ -21,7 +22,8 @@ extern "C" void vanity_round(
     char *suffix,
     uint64_t suffix_len,
     uint8_t *out,
-    bool case_insensitive,
+    bool prefix_case_insensitive,
+    bool suffix_case_insensitive,
     bool leet_speak)
 {
     int deviceCount;
@@ -115,10 +117,20 @@ extern "C" void vanity_round(
         cudaFree(d_buffer);
         return;
     }
-    err = cudaMemcpyToSymbol(d_case_insensitive, &case_insensitive, 1, 0, cudaMemcpyHostToDevice);
+
+    // Copy case insensitive settings to device
+    err = cudaMemcpyToSymbol(d_prefix_case_insensitive, &prefix_case_insensitive, sizeof(bool));
     if (err != cudaSuccess)
     {
-        printf("CUDA memcpy to symbol error (done): %s\n", cudaGetErrorString(err));
+        printf("CUDA memcpy to symbol error (prefix_case_insensitive): %s\n", cudaGetErrorString(err));
+        cudaFree(d_buffer);
+        return;
+    }
+
+    err = cudaMemcpyToSymbol(d_suffix_case_insensitive, &suffix_case_insensitive, sizeof(bool));
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memcpy to symbol error (suffix_case_insensitive): %s\n", cudaGetErrorString(err));
         cudaFree(d_buffer);
         return;
     }
@@ -266,7 +278,7 @@ vanity_search(uint8_t *buffer, uint64_t stride)
         cuda_sha256_update(&address_sha_local, (BYTE *)create_account_seed, 16);
         cuda_sha256_update(&address_sha_local, (BYTE *)owner, 32);
         cuda_sha256_final(&address_sha_local, (BYTE *)local_out);
-        fd_base58_encode_32(local_out, (unsigned char *)(&local_encoded), d_case_insensitive);
+        fd_base58_encode_32(local_out, (unsigned char *)(&local_encoded), d_prefix_case_insensitive || d_suffix_case_insensitive);
 
         // Check prefix and suffix
         // printf("Got key: %s\n", local_encoded);
@@ -347,12 +359,15 @@ __device__ bool matches_search(unsigned char *a, unsigned char *prefix, uint64_t
     // Check prefix
     for (int i = 0; i < prefix_len; i++)
     {
+        char a_char = d_prefix_case_insensitive ? to_lowercase(a[i]) : a[i];
+        char prefix_char = d_prefix_case_insensitive ? to_lowercase(prefix[i]) : prefix[i];
+
         if (d_leet_speak)
         {
-            if (!chars_match_leet(prefix[i], a[i]))
+            if (!chars_match_leet(prefix_char, a_char))
                 return false;
         }
-        else if (a[i] != prefix[i])
+        else if (a_char != prefix_char)
         {
             return false;
         }
@@ -361,12 +376,15 @@ __device__ bool matches_search(unsigned char *a, unsigned char *prefix, uint64_t
     // Check suffix
     for (int i = 0; i < suffix_len; i++)
     {
+        char a_char = d_suffix_case_insensitive ? to_lowercase(a[44 - suffix_len + i]) : a[44 - suffix_len + i];
+        char suffix_char = d_suffix_case_insensitive ? to_lowercase(suffix[i]) : suffix[i];
+
         if (d_leet_speak)
         {
-            if (!chars_match_leet(suffix[i], a[44 - suffix_len + i]))
+            if (!chars_match_leet(suffix_char, a_char))
                 return false;
         }
-        else if (a[44 - suffix_len + i] != suffix[i])
+        else if (a_char != suffix_char)
         {
             return false;
         }
