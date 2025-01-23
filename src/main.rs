@@ -390,26 +390,44 @@ fn grind(mut args: GrindArgs) {
         }
     });
 }
-
 fn get_validated_strings(args: &GrindArgs) -> (&'static str, &'static str, &'static str) {
     // Static string of BS58 characters
     const BS58_CHARS: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
-    // Validate all strings for BS58 characters
-    for (name, s) in [
-        ("prefix", &args.prefix),
-        ("suffix", &args.suffix),
-        ("any", &args.any),
-    ] {
-        for c in s.chars() {
-            assert!(BS58_CHARS.contains(c), "your {name} contains invalid bs58 character: {c}");
+    // Map of invalid chars to their BS58 equivalents
+    const CHAR_MAP: &[(char, char)] = &[
+        ('0', 'o'), // Map 0 to o
+        ('I', '1'), // Map I to 1
+        ('O', 'o'), // Map O to o
+        ('l', '1'), // Map l to 1
+    ];
+
+    // Helper to convert invalid chars to valid BS58
+    fn convert_to_valid_bs58(c: char) -> char {
+        if BS58_CHARS.contains(c) {
+            return c;
         }
+
+        // Try to find a valid replacement
+        for (invalid, valid) in CHAR_MAP {
+            if c == *invalid {
+                return *valid;
+            }
+        }
+
+        // No valid replacement found
+        panic!("Character '{}' cannot be converted to a valid base58 character", c);
     }
 
+    // Convert strings and validate
+    let prefix: String = args.prefix.chars().map(convert_to_valid_bs58).collect();
+    let suffix: String = args.suffix.chars().map(convert_to_valid_bs58).collect();
+    let any: String = args.any.chars().map(convert_to_valid_bs58).collect();
+
     // bs58-aware lowercase conversion for all strings
-    let prefix = maybe_bs58_aware_lowercase(&args.prefix, args.case_insensitive);
-    let suffix = maybe_bs58_aware_lowercase(&args.suffix, args.case_insensitive);
-    let any = maybe_bs58_aware_lowercase(&args.any, args.case_insensitive);
+    let prefix = maybe_bs58_aware_lowercase(&prefix, args.case_insensitive);
+    let suffix = maybe_bs58_aware_lowercase(&suffix, args.case_insensitive);
+    let any = maybe_bs58_aware_lowercase(&any, args.case_insensitive);
 
     (prefix.leak(), suffix.leak(), any.leak())
 }
@@ -553,7 +571,7 @@ fn matches_vanity_key(
     logfather::debug!("  Any: '{}'", any);
 
     let prefix_matches = prefix.is_empty() || check_str.starts_with(&prefix);
-    let suffix_matches = suffix.is_empty() || check_str.ends_with(&suffix);
+    let suffix_matches = suffix.is_empty() || pubkey_str.ends_with(&suffix); // in future, check_str.ends_with(&suffix)
     let any_matches = any.is_empty() || check_str.contains(&any);
 
     logfather::debug!("Match results:");
