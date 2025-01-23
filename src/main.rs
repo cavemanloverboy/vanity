@@ -499,23 +499,16 @@ fn leet_transform(s: &str) -> String {
     s.chars()
         .map(|c| {
             match c {
-                // Only use valid base58 characters
-                '4' => 'a',
+                // Only transform numbers to letters (base58 compatible)
+                '2' => 'z',
                 '3' => 'e',
-                '7' => 't',
-                '1' => 'i', // or 'l'
+                '4' => 'a',
                 '5' => 's',
                 '6' => 'g',
+                '7' => 't',
                 '8' => 'b',
-                '2' => 'z',
-                'A' | 'a' => 'a',
-                'E' | 'e' => 'e',
-                'T' | 't' => 't',
-                'I' | 'i' | 'L' | 'l' => 'i',
-                'S' | 's' => 's',
-                'G' | 'g' => 'g',
-                'B' | 'b' => 'b',
-                'Z' | 'z' => 'z',
+                '1' => 'i', // or 'l', but we use 'i' for consistency
+                // Keep all other characters unchanged
                 _ => c,
             }
         })
@@ -541,14 +534,16 @@ fn matches_vanity_key(
     let check_str = maybe_bs58_aware_lowercase(pubkey_str, case_insensitive);
     logfather::debug!("After case conversion: {}", check_str);
 
+    // Only transform the address string, not the search terms
     let check_str = if leet_speak { leet_transform(&check_str) } else { check_str };
     logfather::debug!("After leet transform: {}", check_str);
 
-    let prefix = if leet_speak { leet_transform(prefix) } else { prefix.to_string() };
-    let suffix = if leet_speak { leet_transform(suffix) } else { suffix.to_string() };
-    let any = if leet_speak { leet_transform(any) } else { any.to_string() };
+    // Don't transform search terms since we want to match letters
+    let prefix = prefix.to_string();
+    let suffix = suffix.to_string();
+    let any = any.to_string();
 
-    logfather::debug!("Transformed search terms:");
+    logfather::debug!("Search terms:");
     logfather::debug!("  Prefix: '{}'", prefix);
     logfather::debug!("  Suffix: '{}'", suffix);
     logfather::debug!("  Any: '{}'", any);
