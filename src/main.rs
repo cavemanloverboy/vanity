@@ -425,7 +425,7 @@ fn get_validated_strings(args: &GrindArgs) -> (&'static str, &'static str, &'sta
         ('0', 'o'), // Map 0 to o
         ('I', '1'), // Map I to 1
         ('O', 'o'), // Map O to o
-        ('l', '1'), // Map l to 1
+        ('l', 'L'), // Map l to L
     ];
 
     // Helper to convert invalid chars to valid BS58

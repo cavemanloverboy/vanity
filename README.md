@@ -12,7 +12,7 @@ A _bLaZinGlY fAsT_ tool for grinding vanity addresses on Solana.
 - Multi-threaded CPU support with automatic thread count detection
 - Automatic compute capability detection for optimal GPU performance
 - Base58-aware case-insensitive matching
-- Leet speak transformations with bidirectional matching
+- Smart leet speak transformations with bidirectional matching
 - Flexible search patterns:
   - Prefix matching (start of address)
   - Suffix matching (end of address)
@@ -22,7 +22,7 @@ A _bLaZinGlY fAsT_ tool for grinding vanity addresses on Solana.
 ### Search Capabilities
 
 - Case-sensitive and case-insensitive matching
-- Leet speak character transformations
+- Bidirectional leet speak transformations (e.g., both 'a' → '4' and '4' → 'a')
 - Smart character mapping for invalid Base58 characters:
   - '0' → 'o'
   - 'I' → '1'
@@ -42,6 +42,7 @@ A _bLaZinGlY fAsT_ tool for grinding vanity addresses on Solana.
   - Saves found addresses and seeds
   - Human-readable format
   - Organized file structure
+- Validation mismatch detection and debugging
 
 ### Deployment Support
 
