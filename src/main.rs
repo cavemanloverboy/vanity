@@ -467,9 +467,10 @@ fn maybe_bs58_aware_lowercase(item: &str, case_insensitive: bool) -> String {
     }
 }
 
+#[cfg(feature = "gpu")]
 extern "C" {
     pub fn vanity_round(
-        gpus: u32,
+        gpus: i32,
         seed: *const u8,
         base: *const u8,
         owner: *const u8,
@@ -488,7 +489,7 @@ extern "C" {
 }
 
 #[cfg(feature = "gpu")]
-fn new_gpu_seed(gpu_id: u32, iteration: u64) -> [u8; 32] {
+fn new_gpu_seed(gpu_id: i32, iteration: u64) -> [u8; 32] {
     Sha256::new()
         .chain_update(rand::random::<[u8; 32]>())
         .chain_update(gpu_id.to_le_bytes())
