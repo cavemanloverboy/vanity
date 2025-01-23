@@ -44,13 +44,17 @@ pub struct GrindArgs {
     #[clap(long, value_parser = parse_pubkey)]
     pub owner: Pubkey,
 
-    /// The prefix for the pubkey
-    #[clap(long)]
+    /// The prefix for the pubkey (optional)
+    #[clap(long, default_value = "")]
     pub prefix: String,
 
-    /// The suffix for the pubkey
-    #[clap(long)]
+    /// The suffix for the pubkey (optional)
+    #[clap(long, default_value = "")]
     pub suffix: String,
+
+    /// Search for this string anywhere in the address
+    #[clap(long, default_value = "")]
+    pub any: String,
 
     /// Whether user cares about the case of the pubkey
     #[clap(long, default_value_t = false)]
@@ -222,7 +226,7 @@ pub fn deploy_with_max_program_len_with_seed(
 fn grind(mut args: GrindArgs) {
     maybe_update_num_cpus(&mut args.num_cpus);
 
-    let (prefix, suffix) = get_validated_prefix_and_suffix(&args);
+    let (prefix, suffix, any) = get_validated_strings(&args);
 
     // Initialize logger with optional logfile
     let mut logger = Logger::new();
@@ -271,6 +275,8 @@ fn grind(mut args: GrindArgs) {
                                 prefix.len() as u64,
                                 suffix.as_ptr(),
                                 suffix.len() as u64,
+                                any.as_ptr(),
+                                any.len() as u64,
                                 out.as_mut_ptr(),
                                 args.case_insensitive,
                                 args.leet_speak
@@ -301,6 +307,7 @@ fn grind(mut args: GrindArgs) {
                                 &pubkey,
                                 prefix,
                                 suffix,
+                                any,
                                 args.case_insensitive,
                                 args.leet_speak
                             )
@@ -350,7 +357,16 @@ fn grind(mut args: GrindArgs) {
 
             count += 1;
 
-            if matches_vanity_key(&pubkey, prefix, suffix, args.case_insensitive, args.leet_speak) {
+            if
+                matches_vanity_key(
+                    &pubkey,
+                    prefix,
+                    suffix,
+                    any,
+                    args.case_insensitive,
+                    args.leet_speak
+                )
+            {
                 let time_secs = timer.elapsed().as_secs_f64();
                 logfather::info!(
                     "cpu {i} found key: {pubkey}; {seed:?} -> {} in {:.3}s; {} attempts; {} attempts per second",
@@ -372,25 +388,27 @@ fn grind(mut args: GrindArgs) {
     });
 }
 
-fn get_validated_prefix_and_suffix(args: &GrindArgs) -> (&'static str, &'static str) {
+fn get_validated_strings(args: &GrindArgs) -> (&'static str, &'static str, &'static str) {
     // Static string of BS58 characters
     const BS58_CHARS: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
-    // Validate prefix (i.e. does it include 0, O, I, l)
-    for c in args.prefix.chars() {
-        assert!(BS58_CHARS.contains(c), "your prefix contains invalid bs58: {}", c);
+    // Validate all strings for BS58 characters
+    for (name, s) in [
+        ("prefix", &args.prefix),
+        ("suffix", &args.suffix),
+        ("any", &args.any),
+    ] {
+        for c in s.chars() {
+            assert!(BS58_CHARS.contains(c), "your {name} contains invalid bs58 character: {c}");
+        }
     }
 
-    // Validate suffix (i.e. does it include 0, O, I, l)
-    for c in args.suffix.chars() {
-        assert!(BS58_CHARS.contains(c), "your suffix contains invalid bs58: {}", c);
-    }
-
-    // bs58-aware lowercase conversion for both prefix and suffix
+    // bs58-aware lowercase conversion for all strings
     let prefix = maybe_bs58_aware_lowercase(&args.prefix, args.case_insensitive);
     let suffix = maybe_bs58_aware_lowercase(&args.suffix, args.case_insensitive);
+    let any = maybe_bs58_aware_lowercase(&args.any, args.case_insensitive);
 
-    (prefix.leak(), suffix.leak())
+    (prefix.leak(), suffix.leak(), any.leak())
 }
 
 fn maybe_bs58_aware_lowercase(item: &str, case_insensitive: bool) -> String {
@@ -418,6 +436,8 @@ extern "C" {
         prefix_len: u64,
         suffix: *const u8,
         suffix_len: u64,
+        any: *const u8,
+        any_len: u64,
         out: *mut u8,
         case_insensitive: bool,
         leet_speak: bool
@@ -472,45 +492,52 @@ fn save_vanity_key(pubkey: &str, seed: &[u8], output_dir: &PathBuf) -> Result<()
     Ok(())
 }
 
+fn leet_transform(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            match c {
+                // Only use valid base58 characters
+                '4' => 'a',
+                '3' => 'e',
+                '7' => 't',
+                '1' => 'i', // or 'l'
+                '5' => 's',
+                '6' => 'g',
+                '8' => 'b',
+                '2' => 'z',
+                'A' | 'a' => 'a',
+                'E' | 'e' => 'e',
+                'T' | 't' => 't',
+                'I' | 'i' | 'L' | 'l' => 'i',
+                'S' | 's' => 's',
+                'G' | 'g' => 'g',
+                'B' | 'b' => 'b',
+                'Z' | 'z' => 'z',
+                _ => c,
+            }
+        })
+        .collect()
+}
+
 fn matches_vanity_key(
     pubkey_str: &str,
     prefix: &str,
     suffix: &str,
+    any: &str,
     case_insensitive: bool,
     leet_speak: bool
 ) -> bool {
     let check_str = maybe_bs58_aware_lowercase(pubkey_str, case_insensitive);
+    let check_str = if leet_speak { leet_transform(&check_str) } else { check_str };
 
-    // Apply leet speak transformations if enabled
-    let check_str = if leet_speak {
-        check_str
-            .chars()
-            .map(|c| {
-                match c {
-                    // Only use valid base58 characters
-                    '4' => 'a',
-                    '3' => 'e',
-                    '7' => 't',
-                    '1' => 'i', // or 'l'
-                    '5' => 's',
-                    '6' => 'g',
-                    '8' => 'b',
-                    '2' => 'z',
-                    'A' | 'a' => 'a',
-                    'E' | 'e' => 'e',
-                    'T' | 't' => 't',
-                    'I' | 'i' | 'L' | 'l' => 'i',
-                    'S' | 's' => 's',
-                    'G' | 'g' => 'g',
-                    'B' | 'b' => 'b',
-                    'Z' | 'z' => 'z',
-                    _ => c,
-                }
-            })
-            .collect::<String>()
-    } else {
-        check_str
-    };
+    let prefix = if leet_speak { leet_transform(prefix) } else { prefix.to_string() };
+    let suffix = if leet_speak { leet_transform(suffix) } else { suffix.to_string() };
+    let any = if leet_speak { leet_transform(any) } else { any.to_string() };
 
-    check_str.starts_with(prefix) && check_str.ends_with(suffix)
+    // Skip checks for empty strings
+    let prefix_matches = prefix.is_empty() || check_str.starts_with(&prefix);
+    let suffix_matches = suffix.is_empty() || check_str.ends_with(&suffix);
+    let any_matches = any.is_empty() || check_str.contains(&any);
+
+    prefix_matches && suffix_matches && any_matches
 }

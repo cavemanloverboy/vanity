@@ -20,6 +20,8 @@ extern "C" void vanity_round(
     uint64_t prefix_len,
     char *suffix,
     uint64_t suffix_len,
+    char *any,
+    uint64_t any_len,
     uint8_t *out,
     bool case_insensitive,
     bool leet_speak)
@@ -37,7 +39,7 @@ extern "C" void vanity_round(
     cudaSetDevice(id);
     gpu_init(id);
 
-    // Allocate device buffer for seed, base, owner, out, prefix len, prefix, suffix_len, suffix
+    // Calculate new buffer size including 'any' string
     uint8_t *d_buffer;
     cudaError_t err = cudaMalloc(
         (void **)&d_buffer,
@@ -48,6 +50,8 @@ extern "C" void vanity_round(
             + prefix_len // prefix
             + 8          // suffix len
             + suffix_len // suffix
+            + 8          // any len
+            + any_len    // any string
             + 16         // out (16 byte seed)
     );
     printf("CUDA device count: %d\n", deviceCount);
@@ -115,6 +119,27 @@ extern "C" void vanity_round(
         cudaFree(d_buffer);
         return;
     }
+
+    // Copy any length and string
+    err = cudaMemcpy(d_buffer + 112 + prefix_len + suffix_len, &any_len, 8, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memcpy error (any_len): %s\n", cudaGetErrorString(err));
+        cudaFree(d_buffer);
+        return;
+    }
+
+    if (any_len > 0)
+    {
+        err = cudaMemcpy(d_buffer + 120 + prefix_len + suffix_len, any, any_len, cudaMemcpyHostToDevice);
+        if (err != cudaSuccess)
+        {
+            printf("CUDA memcpy error (any): %s\n", cudaGetErrorString(err));
+            cudaFree(d_buffer);
+            return;
+        }
+    }
+
     err = cudaMemcpyToSymbol(d_case_insensitive, &case_insensitive, 1, 0, cudaMemcpyHostToDevice);
     if (err != cudaSuccess)
     {
@@ -271,7 +296,14 @@ vanity_search(uint8_t *buffer, uint64_t stride)
         // Check prefix and suffix
         // printf("Got key: %s\n", local_encoded);
 
-        if (matches_search((unsigned char *)local_encoded, (unsigned char *)prefix, prefix_len, (unsigned char *)suffix, suffix_len))
+        if (matches_search(
+                (unsigned char *)local_encoded,
+                (unsigned char *)prefix,
+                prefix_len,
+                (unsigned char *)suffix,
+                suffix_len,
+                (unsigned char *)(buffer + 120 + prefix_len + suffix_len),
+                any_len))
         {
             // Are we first to write result?
             if (atomicMax(&done, 1) == 0)
@@ -347,34 +379,81 @@ __device__ bool chars_match_leet(char a, char b)
     return false;
 }
 
-__device__ bool matches_search(unsigned char *a, unsigned char *prefix, uint64_t prefix_len, unsigned char *suffix, uint64_t suffix_len)
+__device__ bool matches_search(
+    unsigned char *a,
+    unsigned char *prefix,
+    uint64_t prefix_len,
+    unsigned char *suffix,
+    uint64_t suffix_len,
+    unsigned char *any,
+    uint64_t any_len)
 {
-    // Check prefix
-    for (int i = 0; i < prefix_len; i++)
+    // Skip checks if length is 0
+    if (prefix_len > 0)
     {
-        if (d_leet_speak)
+        // Check prefix
+        for (int i = 0; i < prefix_len; i++)
         {
-            if (!chars_match_leet(prefix[i], a[i]))
+            if (d_leet_speak)
+            {
+                if (!chars_match_leet(prefix[i], a[i]))
+                    return false;
+            }
+            else if (a[i] != prefix[i])
+            {
                 return false;
-        }
-        else if (a[i] != prefix[i])
-        {
-            return false;
+            }
         }
     }
 
-    // Check suffix
-    for (int i = 0; i < suffix_len; i++)
+    if (suffix_len > 0)
     {
-        if (d_leet_speak)
+        // Check suffix
+        for (int i = 0; i < suffix_len; i++)
         {
-            if (!chars_match_leet(suffix[i], a[44 - suffix_len + i]))
+            if (d_leet_speak)
+            {
+                if (!chars_match_leet(suffix[i], a[44 - suffix_len + i]))
+                    return false;
+            }
+            else if (a[44 - suffix_len + i] != suffix[i])
+            {
                 return false;
+            }
         }
-        else if (a[44 - suffix_len + i] != suffix[i])
+    }
+
+    if (any_len > 0)
+    {
+        // Check for 'any' string anywhere in the address
+        bool found = false;
+        for (int i = 0; i <= 44 - any_len; i++)
         {
-            return false;
+            bool match = true;
+            for (int j = 0; j < any_len; j++)
+            {
+                if (d_leet_speak)
+                {
+                    if (!chars_match_leet(any[j], a[i + j]))
+                    {
+                        match = false;
+                        break;
+                    }
+                }
+                else if (a[i + j] != any[j])
+                {
+                    match = false;
+                    break;
+                }
+            }
+            if (match)
+            {
+                found = true;
+                break;
+            }
         }
+        if (!found)
+            return false;
     }
 
     return true;
