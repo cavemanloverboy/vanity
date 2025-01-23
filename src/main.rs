@@ -294,7 +294,7 @@ fn grind(mut args: GrindArgs) {
                         hasher.update(&args.owner);
                         pubkey_bytes.copy_from_slice(&hasher.finalize_reset());
 
-                        let pubkey = five8::encode_slice(&pubkey_bytes);
+                        let pubkey = fd_bs58::encode_32(pubkey_bytes);
                         let count = u64::from_le_bytes(array::from_fn(|i| out[16 + i]));
 
                         logfather::info!(
