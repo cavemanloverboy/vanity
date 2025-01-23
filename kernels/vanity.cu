@@ -396,16 +396,6 @@ __device__ bool matches_search(
     bool suffix_matches = true;
     bool any_matches = true;
 
-    // Print full address and search criteria
-    printf("\nCUDA Checking address: %s\n", a);
-    if (prefix_len > 0)
-        printf("Looking for prefix: %.*s (len=%lu)\n", (int)prefix_len, prefix, prefix_len);
-    if (suffix_len > 0)
-        printf("Looking for suffix: %.*s (len=%lu)\n", (int)suffix_len, suffix, suffix_len);
-    if (any_len > 0)
-        printf("Looking for any: %.*s (len=%lu)\n", (int)any_len, any, any_len);
-    printf("Leet speak: %s\n", d_leet_speak ? "enabled" : "disabled");
-
     // Skip checks if length is 0
     if (prefix_len > 0)
     {
@@ -415,11 +405,15 @@ __device__ bool matches_search(
             if (d_leet_speak)
             {
                 if (!chars_match_leet(prefix[i], a[i]))
+                {
                     prefix_matches = false;
+                    break;
+                }
             }
             else if (a[i] != prefix[i])
             {
                 prefix_matches = false;
+                break;
             }
         }
     }
@@ -432,11 +426,15 @@ __device__ bool matches_search(
             if (d_leet_speak)
             {
                 if (!chars_match_leet(suffix[i], a[44 - suffix_len + i]))
+                {
                     suffix_matches = false;
+                    break;
+                }
             }
             else if (a[44 - suffix_len + i] != suffix[i])
             {
                 suffix_matches = false;
+                break;
             }
         }
     }
@@ -444,7 +442,7 @@ __device__ bool matches_search(
     if (any_len > 0)
     {
         // Check for 'any' string anywhere in the address
-        bool found = false;
+        any_matches = false;
         for (int i = 0; i <= 44 - any_len; i++)
         {
             bool match = true;
@@ -466,22 +464,27 @@ __device__ bool matches_search(
             }
             if (match)
             {
-                found = true;
+                any_matches = true;
                 break;
             }
         }
-        if (!found)
-            any_matches = false;
     }
 
-    if (prefix_matches && suffix_matches && any_matches)
+    bool final_match = prefix_matches && suffix_matches && any_matches;
+
+    // Only print if we found a match
+    if (final_match)
     {
         printf("\nCUDA MATCH FOUND!\n");
         printf("Full address: %s\n", a);
-        printf("Prefix match: %s\n", prefix_matches ? "YES" : "NO");
-        printf("Suffix match: %s\n", suffix_matches ? "YES" : "NO");
-        printf("Any match: %s\n", any_matches ? "YES" : "NO");
+        if (prefix_len > 0)
+            printf("Prefix match (%lu chars): '%.*s' - %s\n", prefix_len, (int)prefix_len, prefix, prefix_matches ? "YES" : "NO");
+        if (suffix_len > 0)
+            printf("Suffix match (%lu chars): '%.*s' - %s\n", suffix_len, (int)suffix_len, suffix, suffix_matches ? "YES" : "NO");
+        if (any_len > 0)
+            printf("Any match (%lu chars): '%.*s' - %s\n", any_len, (int)any_len, any, any_matches ? "YES" : "NO");
+        printf("Leet speak: %s\n", d_leet_speak ? "enabled" : "disabled");
     }
 
-    return prefix_matches && suffix_matches && any_matches;
+    return final_match;
 }
