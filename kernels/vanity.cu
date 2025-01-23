@@ -230,12 +230,6 @@ __device__ uint8_t const alphanumeric[63] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXY
 __global__ void
 vanity_search(uint8_t *buffer, uint64_t stride)
 {
-    if (buffer == NULL)
-    {
-        printf("Error: NULL buffer pointer in kernel\n");
-        return;
-    }
-
     // Get thread index
     uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= stride)
@@ -285,10 +279,14 @@ vanity_search(uint8_t *buffer, uint64_t stride)
         cuda_sha256_init(&address_sha);
         cuda_sha256_update(&address_sha, (BYTE *)(buffer + 32), 32);
 
+        // Pre-initialize the context for seed updates
+        CUDA_SHA256_CTX seed_update_ctx;
+        cuda_sha256_init(&seed_update_ctx);
+
         for (uint64_t iter = 0; iter < 1000 * 1000 * 1000; iter++)
         {
             // Has someone found a result?
-            if (iter % 100 == 0)
+            if (iter % 1000 == 0)
             {
                 if (atomicMax(&done, 0) == 1)
                 {
@@ -297,28 +295,39 @@ vanity_search(uint8_t *buffer, uint64_t stride)
                 }
             }
 
-            cuda_sha256_init(&ctx);
+            // Reuse pre-initialized context
+            memcpy(&ctx, &seed_update_ctx, sizeof(CUDA_SHA256_CTX));
             cuda_sha256_update(&ctx, (BYTE *)local_seed, 16);
             cuda_sha256_final(&ctx, (BYTE *)local_seed);
 
             uint32_t *indices = (uint32_t *)&local_seed;
+            // Cache frequently used values
+            const uint32_t idx0 = indices[0];
+            const uint32_t idx1 = indices[1];
+            const uint32_t idx2 = indices[2];
+            const uint32_t idx3 = indices[3];
+            const uint32_t idx4 = indices[4];
+            const uint32_t idx5 = indices[5];
+            const uint32_t idx6 = indices[6];
+            const uint32_t idx7 = indices[7];
+
             uint8_t create_account_seed[16] = {
-                alphanumeric[indices[0] % 62],
-                alphanumeric[indices[1] % 62],
-                alphanumeric[indices[2] % 62],
-                alphanumeric[indices[3] % 62],
-                alphanumeric[indices[4] % 62],
-                alphanumeric[indices[5] % 62],
-                alphanumeric[indices[6] % 62],
-                alphanumeric[indices[7] % 62],
-                alphanumeric[(indices[0] >> 2) % 62],
-                alphanumeric[(indices[1] >> 2) % 62],
-                alphanumeric[(indices[2] >> 2) % 62],
-                alphanumeric[(indices[3] >> 2) % 62],
-                alphanumeric[(indices[4] >> 2) % 62],
-                alphanumeric[(indices[5] >> 2) % 62],
-                alphanumeric[(indices[6] >> 2) % 62],
-                alphanumeric[(indices[7] >> 2) % 62],
+                alphanumeric[idx0 % 62],
+                alphanumeric[idx1 % 62],
+                alphanumeric[idx2 % 62],
+                alphanumeric[idx3 % 62],
+                alphanumeric[idx4 % 62],
+                alphanumeric[idx5 % 62],
+                alphanumeric[idx6 % 62],
+                alphanumeric[idx7 % 62],
+                alphanumeric[(idx0 >> 2) % 62],
+                alphanumeric[(idx1 >> 2) % 62],
+                alphanumeric[(idx2 >> 2) % 62],
+                alphanumeric[(idx3 >> 2) % 62],
+                alphanumeric[(idx4 >> 2) % 62],
+                alphanumeric[(idx5 >> 2) % 62],
+                alphanumeric[(idx6 >> 2) % 62],
+                alphanumeric[(idx7 >> 2) % 62],
             };
 
             // Calculate and encode public
@@ -514,33 +523,24 @@ __device__ bool matches_search(
     if (final_match)
     {
         printf("\nCUDA MATCH FOUND!\n");
-        // Ensure null-terminated string for printing
-        char address_str[45] = {0};
-        memcpy(address_str, address, 44);
-        printf("Full address: %s\n", address_str);
+        printf("Full address: %.44s\n", (char *)address);
 
         if (prefix_len > 0 && prefix_len <= 44)
         {
-            char prefix_str[45] = {0};
-            memcpy(prefix_str, prefix, prefix_len);
-            printf("Prefix match (%lu chars): '%s' - %s\n",
-                   prefix_len, prefix_str, prefix_matches ? "YES" : "NO");
+            printf("Prefix match (%lu chars): '%.44s' - %s\n",
+                   prefix_len, (char *)prefix, prefix_matches ? "YES" : "NO");
         }
 
         if (suffix_len > 0 && suffix_len <= 44)
         {
-            char suffix_str[45] = {0};
-            memcpy(suffix_str, suffix, suffix_len);
-            printf("Suffix match (%lu chars): '%s' - %s\n",
-                   suffix_len, suffix_str, suffix_matches ? "YES" : "NO");
+            printf("Suffix match (%lu chars): '%.44s' - %s\n",
+                   suffix_len, (char *)suffix, suffix_matches ? "YES" : "NO");
         }
 
         if (any_len > 0 && any_len <= 44)
         {
-            char any_str[45] = {0};
-            memcpy(any_str, any, any_len);
-            printf("Any match (%lu chars): '%s' - %s\n",
-                   any_len, any_str, any_matches ? "YES" : "NO");
+            printf("Any match (%lu chars): '%.44s' - %s\n",
+                   any_len, (char *)any, any_matches ? "YES" : "NO");
         }
 
         printf("Leet speak: %s\n", d_leet_speak ? "enabled" : "disabled");

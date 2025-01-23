@@ -252,9 +252,12 @@ fn grind(mut args: GrindArgs) {
                 .spawn(move || {
                     logfather::trace!("starting gpu {gpu_index}");
 
-                    let mut out = [0; 24];
+                    // Pre-allocate buffers
+                    let mut out = [0u8; 24];
+                    let mut pubkey_bytes = [0u8; 32];
+                    let mut hasher = Sha256::new();
+
                     for iteration in 0_u64.. {
-                        // Exit if a thread found a solution
                         if EXIT.load(Ordering::SeqCst) {
                             logfather::trace!("gpu thread {gpu_index} exiting");
                             return;
@@ -263,6 +266,7 @@ fn grind(mut args: GrindArgs) {
                         // Generate new seed for this gpu & iteration
                         let seed = new_gpu_seed(gpu_index, iteration);
                         let timer = Instant::now();
+
                         unsafe {
                             vanity_round(
                                 gpu_index,
@@ -280,18 +284,19 @@ fn grind(mut args: GrindArgs) {
                                 args.leet_speak
                             );
                         }
+
                         let time_sec = timer.elapsed().as_secs_f64();
 
-                        // Reconstruct solution
-                        let pubkey_bytes: [u8; 32] = Sha256::new()
-                            .chain_update(&args.base)
-                            .chain_update(&out[..16])
-                            .chain_update(&args.owner)
-                            .finalize()
-                            .into();
-                        let pubkey = fd_bs58::encode_32(pubkey_bytes);
+                        // Reuse hasher and buffer for pubkey calculation
+                        hasher.reset();
+                        hasher.update(&args.base);
+                        hasher.update(&out[..16]);
+                        hasher.update(&args.owner);
+                        pubkey_bytes.copy_from_slice(&hasher.finalize_reset());
 
+                        let pubkey = five8::encode_slice(&pubkey_bytes);
                         let count = u64::from_le_bytes(array::from_fn(|i| out[16 + i]));
+
                         logfather::info!(
                             "{}.. found in {:.3} seconds on gpu {gpu_index:>3}; {:>13} iters; {:>12} iters/sec",
                             &pubkey[..(prefix.len() + suffix.len() + 4).min(40)],
@@ -309,7 +314,6 @@ fn grind(mut args: GrindArgs) {
                             args.leet_speak
                         );
 
-                        // If CUDA found a match but Rust validation fails, print debug info
                         if !rust_matches && (count > 0 || out[16..24].iter().any(|&x| x != 0)) {
                             logfather::error!("\nMISMATCH DETECTED!");
                             logfather::error!("CUDA found a match but Rust validation failed");
@@ -352,8 +356,6 @@ fn grind(mut args: GrindArgs) {
                             EXIT.store(true, Ordering::SeqCst);
                             logfather::trace!("gpu thread {gpu_index} exiting");
                             return;
-                        } else {
-                            logfather::debug!("pubkey does not match prefix or suffix");
                         }
                     }
                 })
@@ -551,7 +553,9 @@ fn generate_leet_patterns(input: &str) -> Vec<String> {
         return vec![String::new()];
     }
 
-    let mut patterns = vec![input.to_string()];
+    // Pre-allocate with a reasonable capacity
+    let mut patterns = Vec::with_capacity(input.len() * 2);
+    patterns.push(input.to_string());
 
     // First pass: generate patterns by replacing letters with numbers
     for i in 0..input.len() {
@@ -569,12 +573,16 @@ fn generate_leet_patterns(input: &str) -> Vec<String> {
         };
 
         if let Some(repl) = replacement {
-            patterns.push(input[..i].to_string() + repl + &input[i + 1..]);
+            let mut new_pattern = String::with_capacity(input.len());
+            new_pattern.push_str(&input[..i]);
+            new_pattern.push_str(repl);
+            new_pattern.push_str(&input[i + 1..]);
+            patterns.push(new_pattern);
         }
     }
 
     // Second pass: generate patterns by replacing numbers with letters
-    let mut number_patterns = Vec::new();
+    let mut number_patterns = Vec::with_capacity(patterns.len() * 2);
     for pattern in &patterns {
         for i in 0..pattern.len() {
             let c = pattern.chars().nth(i).unwrap();
@@ -591,13 +599,17 @@ fn generate_leet_patterns(input: &str) -> Vec<String> {
             };
 
             for repl in replacements {
-                number_patterns.push(pattern[..i].to_string() + repl + &pattern[i + 1..]);
+                let mut new_pattern = String::with_capacity(pattern.len());
+                new_pattern.push_str(&pattern[..i]);
+                new_pattern.push_str(repl);
+                new_pattern.push_str(&pattern[i + 1..]);
+                number_patterns.push(new_pattern);
             }
         }
     }
 
     patterns.extend(number_patterns);
-    patterns.sort();
+    patterns.sort_unstable(); // Use sort_unstable for better performance
     patterns.dedup();
     patterns
 }
@@ -628,47 +640,57 @@ fn check_matches(check_str: &str, patterns: &[String], match_type: &str) -> bool
     let matches = match match_type {
         "prefix" =>
             patterns.iter().any(|p| {
-                p.is_empty() ||
-                    check_str.starts_with(p) ||
-                    ({
-                        // Also check if any leet variation of the address matches the pattern
-                        let address_patterns = generate_leet_patterns(
-                            &check_str[..p.len().min(check_str.len())]
-                        );
-                        address_patterns.iter().any(|ap| ap == p)
-                    })
+                if p.is_empty() {
+                    return true;
+                }
+                if check_str.starts_with(p) {
+                    return true;
+                }
+                // Only generate patterns if needed
+                if p.len() <= check_str.len() {
+                    let substr = &check_str[..p.len()];
+                    let address_patterns = generate_leet_patterns(substr);
+                    address_patterns.iter().any(|ap| ap == p)
+                } else {
+                    false
+                }
             }),
         "suffix" =>
             patterns.iter().any(|s| {
-                s.is_empty() ||
-                    check_str.ends_with(s) ||
-                    ({
-                        // Also check if any leet variation of the address matches the pattern
-                        if s.len() <= check_str.len() {
-                            let address_patterns = generate_leet_patterns(
-                                &check_str[check_str.len() - s.len()..]
-                            );
-                            address_patterns.iter().any(|ap| ap == s)
-                        } else {
-                            false
-                        }
-                    })
+                if s.is_empty() {
+                    return true;
+                }
+                if check_str.ends_with(s) {
+                    return true;
+                }
+                // Only generate patterns if needed
+                if s.len() <= check_str.len() {
+                    let substr = &check_str[check_str.len() - s.len()..];
+                    let address_patterns = generate_leet_patterns(substr);
+                    address_patterns.iter().any(|ap| ap == s)
+                } else {
+                    false
+                }
             }),
         "any" =>
             patterns.iter().any(|a| {
-                a.is_empty() ||
-                    check_str.contains(a) ||
-                    ({
-                        // Also check if any leet variation of any substring matches the pattern
-                        for i in 0..=check_str.len().saturating_sub(a.len()) {
-                            let substr = &check_str[i..i + a.len()];
-                            let address_patterns = generate_leet_patterns(substr);
-                            if address_patterns.iter().any(|ap| ap == a) {
-                                return true;
-                            }
+                if a.is_empty() {
+                    return true;
+                }
+                if check_str.contains(a) {
+                    return true;
+                }
+                // Only generate patterns for substrings of matching length
+                if a.len() <= check_str.len() {
+                    for i in 0..=check_str.len() - a.len() {
+                        let substr = &check_str[i..i + a.len()];
+                        let address_patterns = generate_leet_patterns(substr);
+                        if address_patterns.iter().any(|ap| ap == a) {
+                            return true;
                         }
-                        false
-                    })
+                    }
+                }
+                false
             }),
         _ => false,
     };
