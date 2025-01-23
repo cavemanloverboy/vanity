@@ -57,7 +57,7 @@ pub struct GrindArgs {
     pub any: String,
 
     /// Whether user cares about the case of the pubkey
-    #[clap(long, default_value_t = false)]
+    #[clap(long = "ci", default_value_t = false)]
     pub case_insensitive: bool,
 
     /// Whether to match leet speak variants (e.g. a=4, e=3, etc)

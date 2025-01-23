@@ -91,7 +91,7 @@ Options:
   --prefix <PREFIX>            The prefix for the pubkey [default: ""]
   --suffix <SUFFIX>            The suffix for the pubkey [default: ""]
   --any <ANY>                  Search for this string anywhere in the address [default: ""]
-  --case-insensitive          Whether to ignore case when matching
+  --ci                        Whether to ignore case when matching
   --leet                      Enable leet speak matching (e.g., a=4, e=3, etc.)
   --logfile <LOGFILE>         Optional log file
   --num-cpus <NUM_CPUS>       Number of CPU threads to use [default: 0]
