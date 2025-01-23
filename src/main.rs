@@ -514,23 +514,36 @@ fn save_vanity_key(pubkey: &str, seed: &[u8], output_dir: &PathBuf) -> Result<()
 }
 
 fn leet_transform(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            match c {
-                // Only transform numbers to letters (base58 compatible)
-                '2' => 'z',
-                '3' => 'e',
-                '4' => 'a',
-                '5' => 's',
-                '6' => 'g',
-                '7' => 't',
-                '8' => 'b',
-                '1' => 'i', // or 'l', but we use 'i' for consistency
-                // Keep all other characters unchanged
-                _ => c,
-            }
-        })
-        .collect()
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+
+    while let Some(c) = chars.next() {
+        // Try both letter-to-number and number-to-letter transformations
+        let transformed = match c {
+            // Letter to number transformations
+            'z' | 'Z' => '2',
+            'e' | 'E' => '3',
+            'a' | 'A' => '4',
+            's' | 'S' => '5',
+            'g' | 'G' => '6',
+            't' | 'T' => '7',
+            'b' | 'B' => '8',
+            'i' | 'I' | 'l' | 'L' => '1',
+            // Number to letter transformations
+            '2' => 'z',
+            '3' => 'e',
+            '4' => 'a',
+            '5' => 's',
+            '6' => 'g',
+            '7' => 't',
+            '8' => 'b',
+            '1' => 'i',
+            // Keep other characters unchanged
+            _ => c,
+        };
+        result.push(transformed);
+    }
+    result
 }
 
 fn matches_vanity_key(
@@ -556,19 +569,25 @@ fn matches_vanity_key(
     let check_str = maybe_bs58_aware_lowercase(pubkey_str, case_insensitive);
     logfather::debug!("After case conversion: {}", check_str);
 
-    // Only transform the address string, not the search terms
-    let check_str = if leet_speak { leet_transform(&check_str) } else { check_str };
-    logfather::debug!("After leet transform: {}", check_str);
+    // Transform both the address and search terms for comparison
+    let (check_str, prefix, suffix, any) = if leet_speak {
+        let transformed_addr = leet_transform(&check_str);
+        logfather::debug!("After leet transform of address: {}", transformed_addr);
 
-    // Don't transform search terms since we want to match letters
-    let prefix = prefix.to_string();
-    let suffix = suffix.to_string();
-    let any = any.to_string();
+        // Also transform search terms to match all possible combinations
+        let transformed_prefix = leet_transform(prefix);
+        let transformed_suffix = leet_transform(suffix);
+        let transformed_any = leet_transform(any);
 
-    logfather::debug!("Search terms:");
-    logfather::debug!("  Prefix: '{}'", prefix);
-    logfather::debug!("  Suffix: '{}'", suffix);
-    logfather::debug!("  Any: '{}'", any);
+        logfather::debug!("After leet transform of search terms:");
+        logfather::debug!("  Prefix: '{}'", transformed_prefix);
+        logfather::debug!("  Suffix: '{}'", transformed_suffix);
+        logfather::debug!("  Any: '{}'", transformed_any);
+
+        (transformed_addr, transformed_prefix, transformed_suffix, transformed_any)
+    } else {
+        (check_str, prefix.to_string(), suffix.to_string(), any.to_string())
+    };
 
     let prefix_matches = prefix.is_empty() || check_str.starts_with(&prefix);
     let suffix_matches = suffix.is_empty() || pubkey_str.ends_with(&suffix); // in future, check_str.ends_with(&suffix)
