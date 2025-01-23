@@ -27,7 +27,7 @@ A _bLaZinGlY fAsT_ tool for grinding vanity addresses on Solana.
   - '0' → 'o'
   - 'I' → '1'
   - 'O' → 'o'
-  - 'l' → '1'
+  - 'l' → 'L'
 - Automatic validation of search strings
 - Real-time performance metrics and progress reporting
 

@@ -345,8 +345,7 @@ fn grind(mut args: GrindArgs) {
                                 core::str::from_utf8(&out[..16]).unwrap_or("Invalid UTF-8")
                             );
 
-                            let output_dir = PathBuf::from("/mnt/f/coding/vanity/keys");
-                            if let Err(err) = save_vanity_key(&pubkey, &out[..16], &output_dir) {
+                            if let Err(err) = save_vanity_key(&pubkey, &out[..16]) {
                                 logfather::error!("{}", err);
                                 return;
                             }
@@ -404,8 +403,7 @@ fn grind(mut args: GrindArgs) {
                     (((count as f64) / time_secs) as u64).to_formatted_string(&Locale::en)
                 );
 
-                let output_dir = PathBuf::from("/mnt/f/coding/vanity/keys");
-                if let Err(err) = save_vanity_key(&pubkey, &seed, &output_dir) {
+                if let Err(err) = save_vanity_key(&pubkey, &seed) {
                     logfather::error!("{}", err);
                     return;
                 }
@@ -514,11 +512,19 @@ fn maybe_update_num_cpus(num_cpus: &mut u32) {
     }
 }
 
-fn save_vanity_key(pubkey: &str, seed: &[u8], output_dir: &PathBuf) -> Result<(), String> {
-    logfather::debug!("Ensuring output directory exists: {}", output_dir.display());
+fn save_vanity_key(pubkey: &str, seed: &[u8]) -> Result<(), String> {
+    let output_dir = PathBuf::from("keys");
+    logfather::debug!("Checking output directory: {}", output_dir.display());
 
-    if let Err(err) = fs::create_dir_all(output_dir) {
-        return Err(format!("Failed to create output directory: {}", err));
+    // Check if directory exists first
+    if !output_dir.exists() {
+        logfather::debug!("Output directory does not exist, creating it");
+        if let Err(err) = fs::create_dir_all(output_dir) {
+            return Err(format!("Failed to create output directory: {}", err));
+        }
+        logfather::info!("Created output directory: {}", output_dir.display());
+    } else {
+        logfather::debug!("Output directory already exists");
     }
 
     let output_file_path = output_dir.join(format!("{}.txt", pubkey));
@@ -527,8 +533,6 @@ fn save_vanity_key(pubkey: &str, seed: &[u8], output_dir: &PathBuf) -> Result<()
     let mut file = File::create(&output_file_path).map_err(|err|
         format!("Error opening file {}: {}", output_file_path.display(), err)
     )?;
-
-    logfather::debug!("Opened file for writing: {}", output_file_path.display());
 
     write!(
         file,
