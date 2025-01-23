@@ -513,13 +513,13 @@ fn maybe_update_num_cpus(num_cpus: &mut u32) {
 }
 
 fn save_vanity_key(pubkey: &str, seed: &[u8]) -> Result<(), String> {
-    let &output_dir = PathBuf::from("keys");
+    let output_dir = PathBuf::from("keys");
     logfather::debug!("Checking output directory: {}", output_dir.display());
 
     // Check if directory exists first
     if !output_dir.exists() {
         logfather::debug!("Output directory does not exist, creating it");
-        if let Err(err) = fs::create_dir_all(output_dir) {
+        if let Err(err) = fs::create_dir_all(&output_dir) {
             return Err(format!("Failed to create output directory: {}", err));
         }
         logfather::info!("Created output directory: {}", output_dir.display());
