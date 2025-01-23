@@ -513,7 +513,7 @@ fn maybe_update_num_cpus(num_cpus: &mut u32) {
 }
 
 fn save_vanity_key(pubkey: &str, seed: &[u8]) -> Result<(), String> {
-    let output_dir = PathBuf::from("keys");
+    let &output_dir = PathBuf::from("keys");
     logfather::debug!("Checking output directory: {}", output_dir.display());
 
     // Check if directory exists first
