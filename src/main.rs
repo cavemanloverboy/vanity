@@ -61,7 +61,7 @@ pub struct GrindArgs {
     pub case_insensitive: bool,
 
     /// Whether to match leet speak variants (e.g. a=4, e=3, etc)
-    #[clap(long, default_value_t = false)]
+    #[clap(long = "leet", default_value_t = false)]
     pub leet_speak: bool,
 
     /// Optional log file
@@ -328,6 +328,12 @@ fn grind(mut args: GrindArgs) {
                             } else {
                                 "disabled"
                             });
+                            logfather::error!("Seed info:");
+                            logfather::error!("  Bytes: {:?}", &out[..16]);
+                            logfather::error!(
+                                "  UTF-8: {}",
+                                core::str::from_utf8(&out[..16]).unwrap_or("Invalid UTF-8")
+                            );
                         }
 
                         if rust_matches {
@@ -536,37 +542,75 @@ fn save_vanity_key(pubkey: &str, seed: &[u8], output_dir: &PathBuf) -> Result<()
     Ok(())
 }
 
-fn leet_transform(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        // Try both letter-to-number and number-to-letter transformations
-        let transformed = match c {
-            // Letter to number transformations
-            'z' | 'Z' => '2',
-            'e' | 'E' => '3',
-            'a' | 'A' => '4',
-            's' | 'S' => '5',
-            'g' | 'G' => '6',
-            't' | 'T' => '7',
-            'b' | 'B' => '8',
-            'i' | 'I' | 'l' | 'L' => '1',
-            // Number to letter transformations
-            '2' => 'z',
-            '3' => 'e',
-            '4' => 'a',
-            '5' => 's',
-            '6' => 'g',
-            '7' => 't',
-            '8' => 'b',
-            '1' => 'i',
-            // Keep other characters unchanged
-            _ => c,
-        };
-        result.push(transformed);
+fn generate_leet_patterns(input: &str) -> Vec<String> {
+    if input.is_empty() {
+        return vec![String::new()];
     }
-    result
+
+    let mut patterns = vec![input.to_string()];
+    for i in 0..input.len() {
+        let c = input.chars().nth(i).unwrap();
+        let replacement = match c {
+            'a' | 'A' => Some("4"),
+            'e' | 'E' => Some("3"),
+            't' | 'T' => Some("7"),
+            'l' | 'L' | 'i' | 'I' => Some("1"),
+            's' | 'S' => Some("5"),
+            'g' | 'G' => Some("6"),
+            'b' | 'B' => Some("8"),
+            'z' | 'Z' => Some("2"),
+            '4' => Some("a"),
+            '3' => Some("e"),
+            '7' => Some("t"),
+            '1' => {
+                patterns.push(input[..i].to_string() + "l" + &input[i + 1..]);
+                Some("i")
+            }
+            '5' => Some("s"),
+            '6' => Some("g"),
+            '8' => Some("b"),
+            '2' => Some("z"),
+            _ => None,
+        };
+
+        if let Some(repl) = replacement {
+            patterns.push(input[..i].to_string() + repl + &input[i + 1..]);
+        }
+    }
+    patterns
+}
+
+fn get_search_patterns(
+    prefix: &str,
+    suffix: &str,
+    any: &str,
+    leet_speak: bool
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    if leet_speak {
+        let prefix_patterns = generate_leet_patterns(prefix);
+        let suffix_patterns = generate_leet_patterns(suffix);
+        let any_patterns = generate_leet_patterns(any);
+
+        logfather::debug!("Generated leet patterns:");
+        logfather::debug!("  Prefix patterns: {:?}", prefix_patterns);
+        logfather::debug!("  Suffix patterns: {:?}", suffix_patterns);
+        logfather::debug!("  Any patterns: {:?}", any_patterns);
+
+        (prefix_patterns, suffix_patterns, any_patterns)
+    } else {
+        (vec![prefix.to_string()], vec![suffix.to_string()], vec![any.to_string()])
+    }
+}
+
+fn check_matches(check_str: &str, patterns: &[String], match_type: &str) -> bool {
+    let matches = match match_type {
+        "prefix" => patterns.iter().any(|p| (p.is_empty() || check_str.starts_with(p))),
+        "suffix" => patterns.iter().any(|s| (s.is_empty() || check_str.ends_with(s))),
+        "any" => patterns.iter().any(|a| (a.is_empty() || check_str.contains(a))),
+        _ => false,
+    };
+    logfather::debug!("  {} match: {}", match_type, matches);
+    matches
 }
 
 fn matches_vanity_key(
@@ -589,43 +633,23 @@ fn matches_vanity_key(
     });
     logfather::debug!("  Leet speak: {}", if leet_speak { "enabled" } else { "disabled" });
 
-    let check_str = maybe_bs58_aware_lowercase(pubkey_str, case_insensitive);
+    let check_str = if case_insensitive {
+        maybe_bs58_aware_lowercase(pubkey_str, true)
+    } else {
+        pubkey_str.to_string()
+    };
     logfather::debug!("After case conversion: {}", check_str);
 
-    // Transform both the address and search terms for comparison
-    let (check_str, prefix, suffix, any) = if leet_speak {
-        let transformed_addr = leet_transform(&check_str);
-        logfather::debug!("After leet transform of address: {}", transformed_addr);
+    let (prefix_patterns, suffix_patterns, any_patterns) = get_search_patterns(
+        prefix,
+        suffix,
+        any,
+        leet_speak
+    );
 
-        // Also transform search terms to match all possible combinations
-        let transformed_prefix = leet_transform(prefix);
-        let transformed_suffix = leet_transform(suffix);
-        let transformed_any = leet_transform(any);
-
-        logfather::debug!("After leet transform of search terms:");
-        logfather::debug!("  Prefix: '{}'", transformed_prefix);
-        logfather::debug!("  Suffix: '{}'", transformed_suffix);
-        logfather::debug!("  Any: '{}'", transformed_any);
-
-        (transformed_addr, transformed_prefix, transformed_suffix, transformed_any)
-    } else {
-        (check_str, prefix.to_string(), suffix.to_string(), any.to_string())
-    };
-
-    let prefix_matches = prefix.is_empty() || check_str.starts_with(&prefix);
-    let suffix_matches = suffix.is_empty() || check_str.ends_with(&suffix);
-    let any_matches = any.is_empty() || check_str.contains(&any);
-
-    logfather::debug!("Match results:");
-    logfather::debug!("  Prefix match: {}", prefix_matches);
-    logfather::debug!("  Suffix match: {}", suffix_matches);
-    logfather::debug!("  Any match: {}", any_matches);
-    logfather::debug!("  Case insensitive: {}", if case_insensitive {
-        "enabled"
-    } else {
-        "disabled"
-    });
-    logfather::debug!("  Leet speak: {}", if leet_speak { "enabled" } else { "disabled" });
+    let prefix_matches = check_matches(&check_str, &prefix_patterns, "prefix");
+    let suffix_matches = check_matches(&check_str, &suffix_patterns, "suffix");
+    let any_matches = check_matches(&check_str, &any_patterns, "any");
 
     prefix_matches && suffix_matches && any_matches
 }

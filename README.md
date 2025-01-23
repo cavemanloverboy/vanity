@@ -6,12 +6,52 @@ A _bLaZinGlY fAsT_ tool for grinding vanity addresses on Solana.
 
 ## Features
 
-- GPU and CPU support for address grinding
-- Case-insensitive matching
-- Leet speak matching (e.g., 'a'='4', 'e'='3', 't'='7', etc.)
-- Prefix, suffix, and "anywhere in address" matching
-- Automatic GPU compute capability detection
-- Output logging and key saving
+### Core Features
+
+- Multi-GPU support with automatic device detection and optimization
+- Multi-threaded CPU support with automatic thread count detection
+- Automatic compute capability detection for optimal GPU performance
+- Base58-aware case-insensitive matching
+- Leet speak transformations with bidirectional matching
+- Flexible search patterns:
+  - Prefix matching (start of address)
+  - Suffix matching (end of address)
+  - Anywhere matching (substring in address)
+  - Combinations of all three patterns
+
+### Search Capabilities
+
+- Case-sensitive and case-insensitive matching
+- Leet speak character transformations
+- Smart character mapping for invalid Base58 characters:
+  - '0' → 'o'
+  - 'I' → '1'
+  - 'O' → 'o'
+  - 'l' → '1'
+- Automatic validation of search strings
+- Real-time performance metrics and progress reporting
+
+### Output and Logging
+
+- Detailed logging with configurable log files
+- Performance statistics:
+  - Iterations per second
+  - Time to find matches
+  - GPU/CPU utilization
+- Automatic key saving:
+  - Saves found addresses and seeds
+  - Human-readable format
+  - Organized file structure
+
+### Deployment Support
+
+- Direct program deployment with found seeds
+- Flexible deployment options:
+  - Custom RPC endpoints
+  - Separate payer accounts
+  - Configurable program authority
+  - Compute unit price adjustment
+- Support for BPF Loader Upgradeable programs
 
 ## Installation
 
@@ -51,9 +91,8 @@ Options:
   --suffix <SUFFIX>            The suffix for the pubkey [default: ""]
   --any <ANY>                  Search for this string anywhere in the address [default: ""]
   --case-insensitive          Whether to ignore case when matching
-  --leet-speak                Enable leet speak matching (e.g., a=4, e=3, etc.)
+  --leet                      Enable leet speak matching (e.g., a=4, e=3, etc.)
   --logfile <LOGFILE>         Optional log file
-  --num-gpus <NUM_GPUS>       Number of GPUs to use [default: 1]
   --num-cpus <NUM_CPUS>       Number of CPU threads to use [default: 0]
 ```
 
@@ -89,28 +128,52 @@ vanity grind --base <PUBKEY> --owner <OWNER> --suffix NICE
 vanity grind --base <PUBKEY> --owner <OWNER> --any RUST
 
 # Case-insensitive search with leet speak
-vanity grind --base <PUBKEY> --owner <OWNER> --any ELITE --case-insensitive --leet-speak
+vanity grind --base <PUBKEY> --owner <OWNER> --any ELITE --case-insensitive --leet
+
+# Combined search patterns
+vanity grind --base <PUBKEY> --owner <OWNER> --prefix COOL --suffix NICE --any RUST
+
+# With logging enabled
+vanity grind --base <PUBKEY> --owner <OWNER> --prefix TEST --logfile output.log
 ```
 
 ### Deploying with Found Seed
 
 ```bash
+# Basic deployment
 vanity deploy --base keypair.json --owner BPFLoaderUpgradeab1e11111111111111111111111 \
   --buffer <BUFFER_PUBKEY> --seed <FOUND_SEED>
+
+# Deployment with custom RPC and payer
+vanity deploy --base keypair.json --owner BPFLoaderUpgradeab1e11111111111111111111111 \
+  --buffer <BUFFER_PUBKEY> --seed <FOUND_SEED> \
+  --rpc "https://api.devnet.solana.com" \
+  --payer payer_keypair.json \
+  --compute-unit-price 1000
 ```
 
-## Performance
+## Technical Details
 
-Performance varies by hardware:
+### Base58 Character Set
 
-- RTX 4090: ~1 billion addresses/second
-- RTX 3050: ~300 million addresses/second
+The tool uses the standard Base58 character set:
 
-The tool automatically detects your GPU's compute capability and optimizes accordingly.
+```
+123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz
+```
 
-## Leet Speak Transformations
+### Character Mapping
 
-The following character transformations are supported:
+Invalid characters are automatically mapped to valid Base58 equivalents:
+
+- '0' → 'o'
+- 'I' → '1'
+- 'O' → 'o'
+- 'l' → '1'
+
+### Leet Speak Transformations
+
+The following bidirectional character transformations are supported:
 
 - a/A ↔ 4
 - e/E ↔ 3
@@ -120,6 +183,23 @@ The following character transformations are supported:
 - g/G ↔ 6
 - b/B ↔ 8
 - z/Z ↔ 2
+
+### Performance
+
+Performance varies by hardware. The tool automatically:
+
+- Detects available GPUs
+- Optimizes for each GPU's compute capability
+- Utilizes all available GPU cores
+- Adjusts CPU thread count based on system capabilities
+
+### Output Format
+
+Found addresses are saved in the following format:
+
+```
+<address> -> [seed_bytes] [seed_utf8]
+```
 
 ## Acknowledgements
 
