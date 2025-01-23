@@ -548,6 +548,8 @@ fn generate_leet_patterns(input: &str) -> Vec<String> {
     }
 
     let mut patterns = vec![input.to_string()];
+
+    // First pass: generate patterns by replacing letters with numbers
     for i in 0..input.len() {
         let c = input.chars().nth(i).unwrap();
         let replacement = match c {
@@ -559,17 +561,6 @@ fn generate_leet_patterns(input: &str) -> Vec<String> {
             'g' | 'G' => Some("6"),
             'b' | 'B' => Some("8"),
             'z' | 'Z' => Some("2"),
-            '4' => Some("a"),
-            '3' => Some("e"),
-            '7' => Some("t"),
-            '1' => {
-                patterns.push(input[..i].to_string() + "l" + &input[i + 1..]);
-                Some("i")
-            }
-            '5' => Some("s"),
-            '6' => Some("g"),
-            '8' => Some("b"),
-            '2' => Some("z"),
             _ => None,
         };
 
@@ -577,6 +568,33 @@ fn generate_leet_patterns(input: &str) -> Vec<String> {
             patterns.push(input[..i].to_string() + repl + &input[i + 1..]);
         }
     }
+
+    // Second pass: generate patterns by replacing numbers with letters
+    let mut number_patterns = Vec::new();
+    for pattern in &patterns {
+        for i in 0..pattern.len() {
+            let c = pattern.chars().nth(i).unwrap();
+            let replacements = match c {
+                '4' => vec!["a", "A"],
+                '3' => vec!["e", "E"],
+                '7' => vec!["t", "T"],
+                '1' => vec!["l", "L", "i", "I"],
+                '5' => vec!["s", "S"],
+                '6' => vec!["g", "G"],
+                '8' => vec!["b", "B"],
+                '2' => vec!["z", "Z"],
+                _ => vec![],
+            };
+
+            for repl in replacements {
+                number_patterns.push(pattern[..i].to_string() + repl + &pattern[i + 1..]);
+            }
+        }
+    }
+
+    patterns.extend(number_patterns);
+    patterns.sort();
+    patterns.dedup();
     patterns
 }
 
@@ -604,9 +622,50 @@ fn get_search_patterns(
 
 fn check_matches(check_str: &str, patterns: &[String], match_type: &str) -> bool {
     let matches = match match_type {
-        "prefix" => patterns.iter().any(|p| (p.is_empty() || check_str.starts_with(p))),
-        "suffix" => patterns.iter().any(|s| (s.is_empty() || check_str.ends_with(s))),
-        "any" => patterns.iter().any(|a| (a.is_empty() || check_str.contains(a))),
+        "prefix" =>
+            patterns.iter().any(|p| {
+                p.is_empty() ||
+                    check_str.starts_with(p) ||
+                    ({
+                        // Also check if any leet variation of the address matches the pattern
+                        let address_patterns = generate_leet_patterns(
+                            &check_str[..p.len().min(check_str.len())]
+                        );
+                        address_patterns.iter().any(|ap| ap == p)
+                    })
+            }),
+        "suffix" =>
+            patterns.iter().any(|s| {
+                s.is_empty() ||
+                    check_str.ends_with(s) ||
+                    ({
+                        // Also check if any leet variation of the address matches the pattern
+                        if s.len() <= check_str.len() {
+                            let address_patterns = generate_leet_patterns(
+                                &check_str[check_str.len() - s.len()..]
+                            );
+                            address_patterns.iter().any(|ap| ap == s)
+                        } else {
+                            false
+                        }
+                    })
+            }),
+        "any" =>
+            patterns.iter().any(|a| {
+                a.is_empty() ||
+                    check_str.contains(a) ||
+                    ({
+                        // Also check if any leet variation of any substring matches the pattern
+                        for i in 0..=check_str.len().saturating_sub(a.len()) {
+                            let substr = &check_str[i..i + a.len()];
+                            let address_patterns = generate_leet_patterns(substr);
+                            if address_patterns.iter().any(|ap| ap == a) {
+                                return true;
+                            }
+                        }
+                        false
+                    })
+            }),
         _ => false,
     };
     logfather::debug!("  {} match: {}", match_type, matches);
