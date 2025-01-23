@@ -528,8 +528,12 @@ fn matches_vanity_key(
     logfather::debug!("  Prefix: '{}' (len={})", prefix, prefix.len());
     logfather::debug!("  Suffix: '{}' (len={})", suffix, suffix.len());
     logfather::debug!("  Any: '{}' (len={})", any, any.len());
-    logfather::debug!("  Case insensitive: {}", case_insensitive);
-    logfather::debug!("  Leet speak: {}", leet_speak);
+    logfather::debug!("  Case insensitive: {}", if case_insensitive {
+        "enabled"
+    } else {
+        "disabled"
+    });
+    logfather::debug!("  Leet speak: {}", if leet_speak { "enabled" } else { "disabled" });
 
     let check_str = maybe_bs58_aware_lowercase(pubkey_str, case_insensitive);
     logfather::debug!("After case conversion: {}", check_str);
@@ -556,6 +560,12 @@ fn matches_vanity_key(
     logfather::debug!("  Prefix match: {}", prefix_matches);
     logfather::debug!("  Suffix match: {}", suffix_matches);
     logfather::debug!("  Any match: {}", any_matches);
+    logfather::debug!("  Case insensitive: {}", if case_insensitive {
+        "enabled"
+    } else {
+        "disabled"
+    });
+    logfather::debug!("  Leet speak: {}", if leet_speak { "enabled" } else { "disabled" });
 
     prefix_matches && suffix_matches && any_matches
 }
