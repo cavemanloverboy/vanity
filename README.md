@@ -103,7 +103,7 @@ Options:
 vanity deploy [OPTIONS] --base <BASE> --owner <OWNER> --buffer <BUFFER> --seed <SEED>
 
 Options:
-  --base <BASE>                Path to base keypair file
+  --base <BASE>               Path to base keypair file
   --rpc <RPC>                 RPC URL [default: "https://api.mainnet-beta.solana.com"]
   --owner <OWNER>             Program owner (usually BPFLoaderUpgradeab1e11111111111111111111111)
   --buffer <BUFFER>           Buffer address containing program data
