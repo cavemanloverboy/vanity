@@ -1,67 +1,127 @@
 # `vanity`
 
-A *bLaZinGlY fAsT* tool for grinding vanity addresses on Solana.
+A _bLaZinGlY fAsT_ tool for grinding vanity addresses on Solana.
 
-## 1) What
+> **Note**: This project (+ the readme) was generated with the assistance of AI (Claude).
 
-Typically, solana developers wishing to obtain a vanity address for their program or token grind out ed25519 keypairs and sign off on a `SystemInstruction::CreateAccount` instruction. However, by using `SystemInstruction::CreateAccountWithSeed`, developers can bypass ed25519 and get extreme speedups on address searches. Although not as generic, this method covers many use cases.
+## Features
 
-## 2) H
+- GPU and CPU support for address grinding
+- Case-insensitive matching
+- Leet speak matching (e.g., 'a'='4', 'e'='3', 't'='7', etc.)
+- Prefix, suffix, and "anywhere in address" matching
+- Automatic GPU compute capability detection
+- Output logging and key saving
 
-By default, vanity compiles for cpu. Install via
+## Installation
+
+### From Cargo
 
 ```bash
+# CPU-only version
 cargo install vanity
-```
 
-To compile for gpu, install via
-
-```bash
+# With GPU support (recommended)
 cargo install vanity --features=gpu
 ```
-If you don't have a GPU, consider using [vast.ai](https://cloud.vast.ai/?ref_id=126830). Pls use this referral link so that I can keep using GPUs.
 
-
-Refer to the help via `vanity --help` for information on usage.
+### Using Docker with GPU
 
 ```bash
+# Build the image
+docker build -f Dockerfile.gpu -t vanity .
 
-Usage: vanity [OPTIONS] --base <BASE> --owner <OWNER> --target <TARGET>
+# Run with GPU access
+docker run --gpus all vanity --help
+```
+
+## Usage
+
+The tool has two main commands: `grind` and `deploy`.
+
+### Grinding Addresses
+
+```bash
+vanity grind [OPTIONS] --base <BASE> --owner <OWNER>
 
 Options:
-      --base <BASE>          The pubkey that will be the signer for the CreateAccountWithSeed instruction
-      --owner <OWNER>        The account owner, e.g. BPFLoaderUpgradeab1e11111111111111111111111 or TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
-      --target <TARGET>      The target prefix for the pubkey
-      --case-insensitive     Whether user cares about the case of the pubkey
-      --logfile <LOGFILE>    Optional log file
-      --num-cpus <NUM_CPUS>  Number of cpu threads to use for mining [default: 0]
-  -h, --help                 Print help
+  --base <BASE>                The pubkey that will be the signer for CreateAccountWithSeed
+  --owner <OWNER>              The account owner (e.g., BPFLoaderUpgradeab1e11111111111111111111111)
+  --prefix <PREFIX>            The prefix for the pubkey [default: ""]
+  --suffix <SUFFIX>            The suffix for the pubkey [default: ""]
+  --any <ANY>                  Search for this string anywhere in the address [default: ""]
+  --case-insensitive          Whether to ignore case when matching
+  --leet-speak                Enable leet speak matching (e.g., a=4, e=3, etc.)
+  --logfile <LOGFILE>         Optional log file
+  --num-gpus <NUM_GPUS>       Number of GPUs to use [default: 1]
+  --num-cpus <NUM_CPUS>       Number of CPU threads to use [default: 0]
 ```
 
-To actually make use of the resulting seed, refer to the `solana_program` docs:
+### Deploying Programs
 
-```rust
-pub fn create_account_with_seed(
-    from_pubkey: &Pubkey,
-    // this is the resulting address, obtained via Pubkey::create_with_seed
-    to_pubkey: &Pubkey, 
-    base: &Pubkey,
-    seed: &str,
-    lamports: u64,
-    space: u64,
-    owner: &Pubkey,
-) -> Instruction
+```bash
+vanity deploy [OPTIONS] --base <BASE> --owner <OWNER> --buffer <BUFFER> --seed <SEED>
+
+Options:
+  --base <BASE>                Path to base keypair file
+  --rpc <RPC>                 RPC URL [default: "https://api.mainnet-beta.solana.com"]
+  --owner <OWNER>             Program owner (usually BPFLoaderUpgradeab1e11111111111111111111111)
+  --buffer <BUFFER>           Buffer address containing program data
+  --payer <PAYER>             Optional separate payer keypair
+  --seed <SEED>               Seed found during grinding
+  --authority <AUTHORITY>     Program authority (defaults to payer)
+  --compute-unit-price <CU>   Optional compute unit price
+  --logfile <LOGFILE>         Optional log file
 ```
 
-## Contributions
+## Examples
 
-yes
+### Finding a Vanity Address
+
+```bash
+# Search for an address starting with "COOL"
+vanity grind --base <PUBKEY> --owner <OWNER> --prefix COOL
+
+# Search for an address ending with "NICE"
+vanity grind --base <PUBKEY> --owner <OWNER> --suffix NICE
+
+# Search for "RUST" anywhere in the address
+vanity grind --base <PUBKEY> --owner <OWNER> --any RUST
+
+# Case-insensitive search with leet speak
+vanity grind --base <PUBKEY> --owner <OWNER> --any ELITE --case-insensitive --leet-speak
+```
+
+### Deploying with Found Seed
+
+```bash
+vanity deploy --base keypair.json --owner BPFLoaderUpgradeab1e11111111111111111111111 \
+  --buffer <BUFFER_PUBKEY> --seed <FOUND_SEED>
+```
 
 ## Performance
 
-one of y'all can fill this out. RTX 4090 does ≈1 billion address searches per second.
+Performance varies by hardware:
 
-## Acknowledgements, External Libraries
+- RTX 4090: ~1 billion addresses/second
+- RTX 3050: ~300 million addresses/second
 
-- The sha2 implementation used in this library is taken from [here](https://github.com/mochimodev/cuda-hashing-algos), which is in the public domain.
-- The base58 encoding implementation is taken from firedancer with heavy modifications for use in cuda & case insensitive encodings, licensed under APACHE-2.0
+The tool automatically detects your GPU's compute capability and optimizes accordingly.
+
+## Leet Speak Transformations
+
+The following character transformations are supported:
+
+- a/A ↔ 4
+- e/E ↔ 3
+- t/T ↔ 7
+- l/L/i/I ↔ 1
+- s/S ↔ 5
+- g/G ↔ 6
+- b/B ↔ 8
+- z/Z ↔ 2
+
+## Acknowledgements
+
+- SHA256 implementation from [cuda-hashing-algos](https://github.com/mochimodev/cuda-hashing-algos) (public domain)
+- Base58 encoding adapted from firedancer (APACHE-2.0)

@@ -611,7 +611,7 @@ fn matches_vanity_key(
     };
 
     let prefix_matches = prefix.is_empty() || check_str.starts_with(&prefix);
-    let suffix_matches = suffix.is_empty() || pubkey_str.ends_with(&suffix); // change in future, but not now
+    let suffix_matches = suffix.is_empty() || check_str.ends_with(&suffix);
     let any_matches = any.is_empty() || check_str.contains(&any);
 
     logfather::debug!("Match results:");

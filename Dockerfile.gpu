@@ -1,15 +1,23 @@
 # Use the NVIDIA CUDA image as a base
-FROM nvidia/cuda:12.6.2-devel-ubuntu22.04
+FROM nvidia/cuda:12.3.1-devel-ubuntu22.04
+
+# Set environment variables
+ENV DEBIAN_FRONTEND=noninteractive
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:$PATH
 
 WORKDIR /usr/src/app
 
+# Install build dependencies and Rust
 RUN apt-get update && apt-get install -y \
     build-essential \
     curl \
+    pkg-config \
+    libssl-dev \
+    git \
+    && rm -rf /var/lib/apt/lists/* \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-
-# Add Rust to PATH
-ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Copy local files into the image
 COPY . .
@@ -17,6 +25,8 @@ COPY . .
 # Build with features=gpu
 RUN cargo build --release --features=gpu
 
-# Use binary as an entry point
+# Set the entrypoint to the binary
 ENTRYPOINT ["./target/release/vanity"]
+
+# Default command shows help
 CMD ["--help"]
