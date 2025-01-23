@@ -68,11 +68,6 @@ pub struct GrindArgs {
     #[clap(long)]
     pub logfile: Option<String>,
 
-    /// Number of gpus to use for mining
-    #[clap(long, default_value_t = 1)]
-    #[cfg(feature = "gpu")]
-    pub num_gpus: u32,
-
     /// Number of cpu threads to use for mining
     #[clap(long, default_value_t = 0)]
     pub num_cpus: u32,
@@ -242,11 +237,14 @@ fn grind(mut args: GrindArgs) {
 
     // Print resource usage
     logfather::info!("using {} threads", args.num_cpus);
-    #[cfg(feature = "gpu")]
-    logfather::info!("using {} gpus", args.num_gpus);
 
     #[cfg(feature = "gpu")]
-    let _gpu_threads: Vec<_> = (0..args.num_gpus)
+    let num_gpus = unsafe { get_gpu_count() };
+    #[cfg(feature = "gpu")]
+    logfather::info!("detected {} GPUs", num_gpus);
+
+    #[cfg(feature = "gpu")]
+    let _gpu_threads: Vec<_> = (0..num_gpus)
         .map(move |gpu_index| {
             std::thread::Builder
                 ::new()
@@ -411,6 +409,7 @@ fn grind(mut args: GrindArgs) {
         }
     });
 }
+
 fn get_validated_strings(args: &GrindArgs) -> (&'static str, &'static str, &'static str) {
     // Static string of BS58 characters
     const BS58_CHARS: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -484,6 +483,8 @@ extern "C" {
         case_insensitive: bool,
         leet_speak: bool
     );
+
+    fn get_gpu_count() -> i32;
 }
 
 #[cfg(feature = "gpu")]

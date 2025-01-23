@@ -9,7 +9,20 @@ int num_gpus;
 int max_threads_per_mp;
 unsigned long long int target_cycles;
 
-// Greatest cmmon denominator
+// Get the number of available CUDA devices
+extern "C" int get_gpu_count()
+{
+    int deviceCount = 0;
+    cudaError_t error = cudaGetDeviceCount(&deviceCount);
+    if (error != cudaSuccess)
+    {
+        printf("Error getting GPU count: %s\n", cudaGetErrorString(error));
+        return 0;
+    }
+    return deviceCount;
+}
+
+// Greatest common denominator
 // Used in gpu_init() to calculate block_size
 int gcd(int a, int b)
 {
