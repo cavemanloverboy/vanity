@@ -392,6 +392,20 @@ __device__ bool matches_search(
     unsigned char *any,
     uint64_t any_len)
 {
+    bool prefix_matches = true;
+    bool suffix_matches = true;
+    bool any_matches = true;
+
+    // Print full address and search criteria
+    printf("\nCUDA Checking address: %s\n", a);
+    if (prefix_len > 0)
+        printf("Looking for prefix: %.*s (len=%lu)\n", (int)prefix_len, prefix, prefix_len);
+    if (suffix_len > 0)
+        printf("Looking for suffix: %.*s (len=%lu)\n", (int)suffix_len, suffix, suffix_len);
+    if (any_len > 0)
+        printf("Looking for any: %.*s (len=%lu)\n", (int)any_len, any, any_len);
+    printf("Leet speak: %s\n", d_leet_speak ? "enabled" : "disabled");
+
     // Skip checks if length is 0
     if (prefix_len > 0)
     {
@@ -401,11 +415,11 @@ __device__ bool matches_search(
             if (d_leet_speak)
             {
                 if (!chars_match_leet(prefix[i], a[i]))
-                    return false;
+                    prefix_matches = false;
             }
             else if (a[i] != prefix[i])
             {
-                return false;
+                prefix_matches = false;
             }
         }
     }
@@ -418,11 +432,11 @@ __device__ bool matches_search(
             if (d_leet_speak)
             {
                 if (!chars_match_leet(suffix[i], a[44 - suffix_len + i]))
-                    return false;
+                    suffix_matches = false;
             }
             else if (a[44 - suffix_len + i] != suffix[i])
             {
-                return false;
+                suffix_matches = false;
             }
         }
     }
@@ -457,8 +471,17 @@ __device__ bool matches_search(
             }
         }
         if (!found)
-            return false;
+            any_matches = false;
     }
 
-    return true;
+    if (prefix_matches && suffix_matches && any_matches)
+    {
+        printf("\nCUDA MATCH FOUND!\n");
+        printf("Full address: %s\n", a);
+        printf("Prefix match: %s\n", prefix_matches ? "YES" : "NO");
+        printf("Suffix match: %s\n", suffix_matches ? "YES" : "NO");
+        printf("Any match: %s\n", any_matches ? "YES" : "NO");
+    }
+
+    return prefix_matches && suffix_matches && any_matches;
 }

@@ -312,8 +312,11 @@ fn grind(mut args: GrindArgs) {
                                 args.leet_speak
                             )
                         {
+                            logfather::info!("\nGPU MATCH FOUND!");
+                            logfather::info!("Full address: {}", pubkey);
+                            logfather::info!("Seed: {:?}", &out[..16]);
                             logfather::info!(
-                                "out seed = {out:?} -> {}",
+                                "UTF-8 seed: {}",
                                 core::str::from_utf8(&out[..16]).unwrap_or("Invalid UTF-8")
                             );
 
@@ -527,17 +530,37 @@ fn matches_vanity_key(
     case_insensitive: bool,
     leet_speak: bool
 ) -> bool {
+    logfather::debug!("\nRust checking address: {}", pubkey_str);
+    logfather::debug!("Search criteria:");
+    logfather::debug!("  Prefix: '{}' (len={})", prefix, prefix.len());
+    logfather::debug!("  Suffix: '{}' (len={})", suffix, suffix.len());
+    logfather::debug!("  Any: '{}' (len={})", any, any.len());
+    logfather::debug!("  Case insensitive: {}", case_insensitive);
+    logfather::debug!("  Leet speak: {}", leet_speak);
+
     let check_str = maybe_bs58_aware_lowercase(pubkey_str, case_insensitive);
+    logfather::debug!("After case conversion: {}", check_str);
+
     let check_str = if leet_speak { leet_transform(&check_str) } else { check_str };
+    logfather::debug!("After leet transform: {}", check_str);
 
     let prefix = if leet_speak { leet_transform(prefix) } else { prefix.to_string() };
     let suffix = if leet_speak { leet_transform(suffix) } else { suffix.to_string() };
     let any = if leet_speak { leet_transform(any) } else { any.to_string() };
 
-    // Skip checks for empty strings
+    logfather::debug!("Transformed search terms:");
+    logfather::debug!("  Prefix: '{}'", prefix);
+    logfather::debug!("  Suffix: '{}'", suffix);
+    logfather::debug!("  Any: '{}'", any);
+
     let prefix_matches = prefix.is_empty() || check_str.starts_with(&prefix);
     let suffix_matches = suffix.is_empty() || check_str.ends_with(&suffix);
     let any_matches = any.is_empty() || check_str.contains(&any);
+
+    logfather::debug!("Match results:");
+    logfather::debug!("  Prefix match: {}", prefix_matches);
+    logfather::debug!("  Suffix match: {}", suffix_matches);
+    logfather::debug!("  Any match: {}", any_matches);
 
     prefix_matches && suffix_matches && any_matches
 }
