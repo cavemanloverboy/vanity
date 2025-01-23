@@ -39,7 +39,7 @@ extern "C" void vanity_round(
     cudaSetDevice(id);
     gpu_init(id);
 
-    // Calculate total buffer size
+    // Calculate total buffer size with padding for alignment
     size_t total_buffer_size =
         32 +         // seed
         32 +         // base
@@ -50,9 +50,13 @@ extern "C" void vanity_round(
         suffix_len + // suffix
         8 +          // any len
         any_len +    // any string
-        16;          // out (16 byte seed)
+        16 +         // out (16 byte seed)
+        8;           // padding for alignment
 
-    printf("Allocating buffer of size: %zu bytes\n", total_buffer_size);
+    // Ensure buffer size is aligned to 16 bytes
+    total_buffer_size = (total_buffer_size + 15) & ~15;
+
+    printf("Allocating aligned buffer of size: %zu bytes\n", total_buffer_size);
 
     // Allocate device buffer
     uint8_t *d_buffer;
@@ -226,117 +230,135 @@ __device__ uint8_t const alphanumeric[63] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXY
 __global__ void
 vanity_search(uint8_t *buffer, uint64_t stride)
 {
-    // Deconstruct buffer
-    uint8_t *seed = buffer;
-    uint8_t *base = buffer + 32;
-    uint8_t *owner = buffer + 64;
-    uint64_t prefix_len;
-    uint64_t suffix_len;
-    uint64_t any_len;
-
-    // Get the lengths from buffer
-    memcpy(&prefix_len, buffer + 96, 8);
-    memcpy(&suffix_len, buffer + 104 + prefix_len, 8);
-    memcpy(&any_len, buffer + 112 + prefix_len + suffix_len, 8);
-
-    // Get the pointers to the strings
-    uint8_t *prefix = buffer + 104;
-    uint8_t *suffix = buffer + 112 + prefix_len;
-    uint8_t *any = buffer + 120 + prefix_len + suffix_len;
-    uint8_t *out = buffer + 120 + prefix_len + suffix_len + any_len;
-
-    // Add size verification
-    if (prefix_len > 44 || suffix_len > 44 || any_len > 44)
+    if (buffer == NULL)
     {
-        printf("Invalid string length: prefix=%lu, suffix=%lu, any=%lu\n",
-               prefix_len, suffix_len, any_len);
+        printf("Error: NULL buffer pointer in kernel\n");
         return;
     }
 
+    // Get thread index
     uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    unsigned char local_out[32] = {0};
-    unsigned char local_encoded[44] = {0};
-    uint64_t local_seed[4];
-
-    // Pseudo random generator
-    CUDA_SHA256_CTX ctx;
-    cuda_sha256_init(&ctx);
-    cuda_sha256_update(&ctx, (BYTE *)(seed), 32);
-    cuda_sha256_update(&ctx, (BYTE *)(&idx), 8);
-    cuda_sha256_final(&ctx, (BYTE *)local_seed);
-
-    CUDA_SHA256_CTX address_sha;
-    cuda_sha256_init(&address_sha);
-    cuda_sha256_update(&address_sha, (BYTE *)base, 32);
-
-    for (uint64_t iter = 0; iter < 1000 * 1000 * 1000; iter++)
+    if (idx >= stride)
     {
-        // Has someone found a result?
-        if (iter % 100 == 0)
+        return;
+    }
+
+    // Deconstruct buffer with bounds checking
+    uint64_t prefix_len = 0;
+    uint64_t suffix_len = 0;
+    uint64_t any_len = 0;
+
+    // Read lengths with bounds checking
+    if (memcpy(&prefix_len, buffer + 96, 8) != NULL &&
+        prefix_len <= 44 &&
+        memcpy(&suffix_len, buffer + 104 + prefix_len, 8) != NULL &&
+        suffix_len <= 44 &&
+        memcpy(&any_len, buffer + 112 + prefix_len + suffix_len, 8) != NULL &&
+        any_len <= 44)
+    {
+        // Get the pointers to the strings
+        uint8_t *prefix = buffer + 104;
+        uint8_t *suffix = buffer + 112 + prefix_len;
+        uint8_t *any = buffer + 120 + prefix_len + suffix_len;
+        uint8_t *out = buffer + 120 + prefix_len + suffix_len + any_len;
+
+        // Add size verification
+        if (prefix_len > 44 || suffix_len > 44 || any_len > 44)
         {
-            if (atomicMax(&done, 0) == 1)
+            printf("Invalid string length: prefix=%lu, suffix=%lu, any=%lu\n",
+                   prefix_len, suffix_len, any_len);
+            return;
+        }
+
+        unsigned char local_out[32] = {0};
+        unsigned char local_encoded[44] = {0};
+        uint64_t local_seed[4];
+
+        // Pseudo random generator
+        CUDA_SHA256_CTX ctx;
+        cuda_sha256_init(&ctx);
+        cuda_sha256_update(&ctx, (BYTE *)(buffer), 32);
+        cuda_sha256_update(&ctx, (BYTE *)(&idx), 8);
+        cuda_sha256_final(&ctx, (BYTE *)local_seed);
+
+        CUDA_SHA256_CTX address_sha;
+        cuda_sha256_init(&address_sha);
+        cuda_sha256_update(&address_sha, (BYTE *)(buffer + 32), 32);
+
+        for (uint64_t iter = 0; iter < 1000 * 1000 * 1000; iter++)
+        {
+            // Has someone found a result?
+            if (iter % 100 == 0)
             {
-                atomicAdd(&count, iter);
+                if (atomicMax(&done, 0) == 1)
+                {
+                    atomicAdd(&count, iter);
+                    return;
+                }
+            }
+
+            cuda_sha256_init(&ctx);
+            cuda_sha256_update(&ctx, (BYTE *)local_seed, 16);
+            cuda_sha256_final(&ctx, (BYTE *)local_seed);
+
+            uint32_t *indices = (uint32_t *)&local_seed;
+            uint8_t create_account_seed[16] = {
+                alphanumeric[indices[0] % 62],
+                alphanumeric[indices[1] % 62],
+                alphanumeric[indices[2] % 62],
+                alphanumeric[indices[3] % 62],
+                alphanumeric[indices[4] % 62],
+                alphanumeric[indices[5] % 62],
+                alphanumeric[indices[6] % 62],
+                alphanumeric[indices[7] % 62],
+                alphanumeric[(indices[0] >> 2) % 62],
+                alphanumeric[(indices[1] >> 2) % 62],
+                alphanumeric[(indices[2] >> 2) % 62],
+                alphanumeric[(indices[3] >> 2) % 62],
+                alphanumeric[(indices[4] >> 2) % 62],
+                alphanumeric[(indices[5] >> 2) % 62],
+                alphanumeric[(indices[6] >> 2) % 62],
+                alphanumeric[(indices[7] >> 2) % 62],
+            };
+
+            // Calculate and encode public
+            CUDA_SHA256_CTX address_sha_local;
+            memcpy(&address_sha_local, &address_sha, sizeof(CUDA_SHA256_CTX));
+            cuda_sha256_update(&address_sha_local, (BYTE *)create_account_seed, 16);
+            cuda_sha256_update(&address_sha_local, (BYTE *)(buffer + 64), 32);
+            cuda_sha256_final(&address_sha_local, (BYTE *)local_out);
+            fd_base58_encode_32(local_out, (unsigned char *)(&local_encoded), d_case_insensitive);
+
+            // Check prefix and suffix
+            // printf("Got key: %s\n", local_encoded);
+
+            if (matches_search(
+                    (unsigned char *)local_encoded,
+                    (unsigned char *)prefix,
+                    prefix_len,
+                    (unsigned char *)suffix,
+                    suffix_len,
+                    (unsigned char *)any,
+                    any_len))
+            {
+                // Are we first to write result?
+                if (atomicMax(&done, 1) == 0)
+                {
+                    // seed for CreateAccountWithSeed
+                    // printf("Match found! Copying result to out\n");
+
+                    memcpy(out, create_account_seed, 16);
+                }
+
+                atomicAdd(&count, iter + 1);
                 return;
             }
         }
-
-        cuda_sha256_init(&ctx);
-        cuda_sha256_update(&ctx, (BYTE *)local_seed, 16);
-        cuda_sha256_final(&ctx, (BYTE *)local_seed);
-
-        uint32_t *indices = (uint32_t *)&local_seed;
-        uint8_t create_account_seed[16] = {
-            alphanumeric[indices[0] % 62],
-            alphanumeric[indices[1] % 62],
-            alphanumeric[indices[2] % 62],
-            alphanumeric[indices[3] % 62],
-            alphanumeric[indices[4] % 62],
-            alphanumeric[indices[5] % 62],
-            alphanumeric[indices[6] % 62],
-            alphanumeric[indices[7] % 62],
-            alphanumeric[(indices[0] >> 2) % 62],
-            alphanumeric[(indices[1] >> 2) % 62],
-            alphanumeric[(indices[2] >> 2) % 62],
-            alphanumeric[(indices[3] >> 2) % 62],
-            alphanumeric[(indices[4] >> 2) % 62],
-            alphanumeric[(indices[5] >> 2) % 62],
-            alphanumeric[(indices[6] >> 2) % 62],
-            alphanumeric[(indices[7] >> 2) % 62],
-        };
-
-        // Calculate and encode public
-        CUDA_SHA256_CTX address_sha_local;
-        memcpy(&address_sha_local, &address_sha, sizeof(CUDA_SHA256_CTX));
-        cuda_sha256_update(&address_sha_local, (BYTE *)create_account_seed, 16);
-        cuda_sha256_update(&address_sha_local, (BYTE *)owner, 32);
-        cuda_sha256_final(&address_sha_local, (BYTE *)local_out);
-        fd_base58_encode_32(local_out, (unsigned char *)(&local_encoded), d_case_insensitive);
-
-        // Check prefix and suffix
-        // printf("Got key: %s\n", local_encoded);
-
-        if (matches_search(
-                (unsigned char *)local_encoded,
-                (unsigned char *)prefix,
-                prefix_len,
-                (unsigned char *)suffix,
-                suffix_len,
-                (unsigned char *)any,
-                any_len))
-        {
-            // Are we first to write result?
-            if (atomicMax(&done, 1) == 0)
-            {
-                // seed for CreateAccountWithSeed
-                // printf("Match found! Copying result to out\n");
-
-                memcpy(out, create_account_seed, 16);
-            }
-
-            atomicAdd(&count, iter + 1);
-            return;
-        }
+    }
+    else
+    {
+        printf("Error: Invalid buffer lengths or memory access\n");
+        return;
     }
 }
 
@@ -488,17 +510,39 @@ __device__ bool matches_search(
 
     bool final_match = prefix_matches && suffix_matches && any_matches;
 
-    // Only print if we found a match
+    // Only print if we found a match, with bounds checking
     if (final_match)
     {
         printf("\nCUDA MATCH FOUND!\n");
-        printf("Full address: %s\n", a);
-        if (prefix_len > 0)
-            printf("Prefix match (%lu chars): '%.*s' - %s\n", prefix_len, (int)prefix_len, prefix, prefix_matches ? "YES" : "NO");
-        if (suffix_len > 0)
-            printf("Suffix match (%lu chars): '%.*s' - %s\n", suffix_len, (int)suffix_len, suffix, suffix_matches ? "YES" : "NO");
-        if (any_len > 0)
-            printf("Any match (%lu chars): '%.*s' - %s\n", any_len, (int)any_len, any, any_matches ? "YES" : "NO");
+        // Ensure null-terminated string for printing
+        char address_str[45] = {0};
+        memcpy(address_str, a, 44);
+        printf("Full address: %s\n", address_str);
+
+        if (prefix_len > 0 && prefix_len <= 44)
+        {
+            char prefix_str[45] = {0};
+            memcpy(prefix_str, prefix, prefix_len);
+            printf("Prefix match (%lu chars): '%s' - %s\n",
+                   prefix_len, prefix_str, prefix_matches ? "YES" : "NO");
+        }
+
+        if (suffix_len > 0 && suffix_len <= 44)
+        {
+            char suffix_str[45] = {0};
+            memcpy(suffix_str, suffix, suffix_len);
+            printf("Suffix match (%lu chars): '%s' - %s\n",
+                   suffix_len, suffix_str, suffix_matches ? "YES" : "NO");
+        }
+
+        if (any_len > 0 && any_len <= 44)
+        {
+            char any_str[45] = {0};
+            memcpy(any_str, any, any_len);
+            printf("Any match (%lu chars): '%s' - %s\n",
+                   any_len, any_str, any_matches ? "YES" : "NO");
+        }
+
         printf("Leet speak: %s\n", d_leet_speak ? "enabled" : "disabled");
     }
 
