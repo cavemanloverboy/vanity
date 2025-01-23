@@ -302,16 +302,37 @@ fn grind(mut args: GrindArgs) {
                             (((count as f64) / time_sec) as u64).to_formatted_string(&Locale::en)
                         );
 
-                        if
-                            matches_vanity_key(
-                                &pubkey,
-                                prefix,
-                                suffix,
-                                any,
-                                args.case_insensitive,
-                                args.leet_speak
-                            )
-                        {
+                        let rust_matches = matches_vanity_key(
+                            &pubkey,
+                            prefix,
+                            suffix,
+                            any,
+                            args.case_insensitive,
+                            args.leet_speak
+                        );
+
+                        // If CUDA found a match but Rust validation fails, print debug info
+                        if !rust_matches && (count > 0 || out[16..24].iter().any(|&x| x != 0)) {
+                            logfather::error!("\nMISMATCH DETECTED!");
+                            logfather::error!("CUDA found a match but Rust validation failed");
+                            logfather::error!("Address: {}", pubkey);
+                            logfather::error!("Search criteria:");
+                            logfather::error!("  Prefix: '{}'", prefix);
+                            logfather::error!("  Suffix: '{}'", suffix);
+                            logfather::error!("  Any: '{}'", any);
+                            logfather::error!("  Case insensitive: {}", if args.case_insensitive {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            });
+                            logfather::error!("  Leet speak: {}", if args.leet_speak {
+                                "enabled"
+                            } else {
+                                "disabled"
+                            });
+                        }
+
+                        if rust_matches {
                             logfather::info!("\nGPU MATCH FOUND!");
                             logfather::info!("Full address: {}", pubkey);
                             logfather::info!("Seed: {:?}", &out[..16]);
@@ -590,7 +611,7 @@ fn matches_vanity_key(
     };
 
     let prefix_matches = prefix.is_empty() || check_str.starts_with(&prefix);
-    let suffix_matches = suffix.is_empty() || pubkey_str.ends_with(&suffix); // in future, check_str.ends_with(&suffix)
+    let suffix_matches = suffix.is_empty() || check_str.ends_with(&suffix);
     let any_matches = any.is_empty() || check_str.contains(&any);
 
     logfather::debug!("Match results:");
