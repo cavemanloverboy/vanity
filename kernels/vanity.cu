@@ -39,28 +39,36 @@ extern "C" void vanity_round(
     cudaSetDevice(id);
     gpu_init(id);
 
-    // Calculate new buffer size including 'any' string
-    uint8_t *d_buffer;
-    cudaError_t err = cudaMalloc(
-        (void **)&d_buffer,
-        32               // seed
-            + 32         // base
-            + 32         // owner
-            + 8          // prefix len
-            + prefix_len // prefix
-            + 8          // suffix len
-            + suffix_len // suffix
-            + 8          // any len
-            + any_len    // any string
-            + 16         // out (16 byte seed)
-    );
-    printf("CUDA device count: %d\n", deviceCount);
-    printf("Setting GPU device %d\n", id);
-    printf("CUDA malloc successful for d_buffer\n");
+    // Calculate total buffer size
+    size_t total_buffer_size =
+        32 +         // seed
+        32 +         // base
+        32 +         // owner
+        8 +          // prefix len
+        prefix_len + // prefix
+        8 +          // suffix len
+        suffix_len + // suffix
+        8 +          // any len
+        any_len +    // any string
+        16;          // out (16 byte seed)
 
+    printf("Allocating buffer of size: %zu bytes\n", total_buffer_size);
+
+    // Allocate device buffer
+    uint8_t *d_buffer;
+    cudaError_t err = cudaMalloc((void **)&d_buffer, total_buffer_size);
     if (err != cudaSuccess)
     {
         printf("CUDA malloc error (d_buffer): %s\n", cudaGetErrorString(err));
+        return;
+    }
+
+    // Initialize buffer to zero
+    err = cudaMemset(d_buffer, 0, total_buffer_size);
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memset error: %s\n", cudaGetErrorString(err));
+        cudaFree(d_buffer);
         return;
     }
 
@@ -190,9 +198,9 @@ extern "C" void vanity_round(
 
     printf("Vanity search kernel launched and synchronized\n");
 
-    // Copy result to host
-    // Copy the output from device to host
-    err = cudaMemcpy(out, d_buffer + 104 + prefix_len + suffix_len, 16, cudaMemcpyDeviceToHost);
+    // Fix output copy location
+    size_t out_offset = 120 + prefix_len + suffix_len + any_len;
+    err = cudaMemcpy(out, d_buffer + out_offset, 16, cudaMemcpyDeviceToHost);
     if (err != cudaSuccess)
     {
         printf("CUDA memcpy error (d_out): %s\n", cudaGetErrorString(err));
@@ -236,6 +244,14 @@ vanity_search(uint8_t *buffer, uint64_t stride)
     uint8_t *suffix = buffer + 112 + prefix_len;
     uint8_t *any = buffer + 120 + prefix_len + suffix_len;
     uint8_t *out = buffer + 120 + prefix_len + suffix_len + any_len;
+
+    // Add size verification
+    if (prefix_len > 44 || suffix_len > 44 || any_len > 44)
+    {
+        printf("Invalid string length: prefix=%lu, suffix=%lu, any=%lu\n",
+               prefix_len, suffix_len, any_len);
+        return;
+    }
 
     uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned char local_out[32] = {0};
