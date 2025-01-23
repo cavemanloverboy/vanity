@@ -422,7 +422,7 @@ __device__ bool chars_match_leet(char a, char b)
 }
 
 __device__ bool matches_search(
-    unsigned char *a,
+    unsigned char *address,
     unsigned char *prefix,
     uint64_t prefix_len,
     unsigned char *suffix,
@@ -442,13 +442,13 @@ __device__ bool matches_search(
         {
             if (d_leet_speak)
             {
-                if (!chars_match_leet(prefix[i], a[i]))
+                if (!chars_match_leet(prefix[i], address[i]))
                 {
                     prefix_matches = false;
                     break;
                 }
             }
-            else if (a[i] != prefix[i])
+            else if (address[i] != prefix[i])
             {
                 prefix_matches = false;
                 break;
@@ -463,13 +463,13 @@ __device__ bool matches_search(
         {
             if (d_leet_speak)
             {
-                if (!chars_match_leet(suffix[i], a[44 - suffix_len + i]))
+                if (!chars_match_leet(suffix[i], address[44 - suffix_len + i]))
                 {
                     suffix_matches = false;
                     break;
                 }
             }
-            else if (a[44 - suffix_len + i] != suffix[i])
+            else if (address[44 - suffix_len + i] != suffix[i])
             {
                 suffix_matches = false;
                 break;
@@ -488,13 +488,13 @@ __device__ bool matches_search(
             {
                 if (d_leet_speak)
                 {
-                    if (!chars_match_leet(any[j], a[i + j]))
+                    if (!chars_match_leet(any[j], address[i + j]))
                     {
                         match = false;
                         break;
                     }
                 }
-                else if (a[i + j] != any[j])
+                else if (address[i + j] != any[j])
                 {
                     match = false;
                     break;
@@ -516,7 +516,7 @@ __device__ bool matches_search(
         printf("\nCUDA MATCH FOUND!\n");
         // Ensure null-terminated string for printing
         char address_str[45] = {0};
-        memcpy(address_str, a, 44);
+        memcpy(address_str, address, 44);
         printf("Full address: %s\n", address_str);
 
         if (prefix_len > 0 && prefix_len <= 44)
@@ -544,6 +544,7 @@ __device__ bool matches_search(
         }
 
         printf("Leet speak: %s\n", d_leet_speak ? "enabled" : "disabled");
+        printf("Case insensitive: %s\n", d_case_insensitive ? "enabled" : "disabled");
     }
 
     return final_match;
