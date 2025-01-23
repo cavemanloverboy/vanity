@@ -224,14 +224,18 @@ vanity_search(uint8_t *buffer, uint64_t stride)
     uint8_t *owner = buffer + 64;
     uint64_t prefix_len;
     uint64_t suffix_len;
+    uint64_t any_len;
 
-    // Assuming the prefix and suffix lengths are already in the buffer
+    // Get the lengths from buffer
     memcpy(&prefix_len, buffer + 96, 8);
-    memcpy(&suffix_len, buffer + 104 + prefix_len, 8); // Assuming suffix_len is placed after the prefix
+    memcpy(&suffix_len, buffer + 104 + prefix_len, 8);
+    memcpy(&any_len, buffer + 112 + prefix_len + suffix_len, 8);
 
-    uint8_t *prefix = buffer + 104;                          // The prefix starts after the prefix_len
-    uint8_t *suffix = buffer + 104 + prefix_len;             // The suffix starts after the prefix data
-    uint8_t *out = (buffer + 104 + prefix_len + suffix_len); // Out is after both prefix and suffix
+    // Get the pointers to the strings
+    uint8_t *prefix = buffer + 104;
+    uint8_t *suffix = buffer + 112 + prefix_len;
+    uint8_t *any = buffer + 120 + prefix_len + suffix_len;
+    uint8_t *out = buffer + 120 + prefix_len + suffix_len + any_len;
 
     uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
     unsigned char local_out[32] = {0};
@@ -302,7 +306,7 @@ vanity_search(uint8_t *buffer, uint64_t stride)
                 prefix_len,
                 (unsigned char *)suffix,
                 suffix_len,
-                (unsigned char *)(buffer + 120 + prefix_len + suffix_len),
+                (unsigned char *)any,
                 any_len))
         {
             // Are we first to write result?
