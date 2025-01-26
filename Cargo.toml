@@ -10,8 +10,8 @@ license = "MIT OR Apache-2.0"
 description = "A *bLaZinGlY fAsT* tool for grinding vanity addresses on Solana"
 
 [features]
+default = ["gpu"]
 gpu = ["cc"]
-default = []
 
 [profile.release]
 lto = "fat"
