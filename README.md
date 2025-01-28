@@ -54,28 +54,6 @@ A _bLaZinGlY fAsT_ tool for grinding vanity addresses on Solana.
   - Compute unit price adjustment
 - Support for BPF Loader Upgradeable programs
 
-## Installation
-
-### From Cargo
-
-```bash
-# CPU-only version
-cargo install vanity
-
-# With GPU support (recommended)
-cargo install vanity --features=gpu
-```
-
-### Using Docker with GPU
-
-```bash
-# Build the image
-docker build -f Dockerfile.gpu -t vanity .
-
-# Run with GPU access
-docker run --gpus all vanity --help
-```
-
 ## Usage
 
 The tool has two main commands: `grind` and `deploy`.
