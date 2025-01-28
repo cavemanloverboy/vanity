@@ -129,7 +129,7 @@ vanity grind --base <PUBKEY> --owner <OWNER> --suffix NICE
 vanity grind --base <PUBKEY> --owner <OWNER> --any RUST
 
 # Case-insensitive search with leet speak
-vanity grind --base <PUBKEY> --owner <OWNER> --any ELITE --case-insensitive --leet
+vanity grind --base <PUBKEY> --owner <OWNER> --any ELITE --ci --leet
 
 # Combined search patterns
 vanity grind --base <PUBKEY> --owner <OWNER> --prefix COOL --suffix NICE --any RUST
