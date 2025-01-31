@@ -577,6 +577,20 @@ __device__ bool matches_search(
     {
         printf("\nCUDA MATCH FOUND!\n");
         printf("Full address: %.44s\n", (char *)address);
+        printf("Raw seed bytes: [");
+        for (int i = 0; i < 16; i++)
+        {
+            printf("%02x", ((uint8_t *)out)[i]);
+            if (i < 15)
+                printf(", ");
+        }
+        printf("]\n");
+        printf("Raw seed UTF-8: ");
+        for (int i = 0; i < 16; i++)
+        {
+            printf("%c", ((char *)out)[i]);
+        }
+        printf("\n");
 
         if (prefix_len > 0 && prefix_len <= 44)
         {

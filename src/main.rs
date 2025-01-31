@@ -16,6 +16,7 @@ use solana_sdk::{
     system_program,
     sysvar,
     transaction::Transaction,
+    signature::{ Keypair },
 };
 
 use std::{
@@ -27,6 +28,10 @@ use std::{
     fs::{ self, File },
     io::Write,
 };
+
+use base64;
+use bs58;
+use hex;
 
 #[derive(Debug, Parser)]
 pub enum Command {
@@ -371,11 +376,7 @@ fn grind(mut args: GrindArgs) {
                         if rust_matches {
                             logfather::info!("\nGPU MATCH FOUND!");
                             logfather::info!("Full address: {}", pubkey);
-                            logfather::info!("Seed: {:?}", &out[..16]);
-                            logfather::info!(
-                                "UTF-8 seed: {}",
-                                core::str::from_utf8(&out[..16]).unwrap_or("Invalid UTF-8")
-                            );
+                            print_key_details(&out[..16], &args.base, &args.owner);
 
                             if let Err(err) = save_vanity_key(&pubkey, &out[..16]) {
                                 logfather::error!("{}", err);
@@ -434,6 +435,8 @@ fn grind(mut args: GrindArgs) {
                     count.to_formatted_string(&Locale::en),
                     (((count as f64) / time_secs) as u64).to_formatted_string(&Locale::en)
                 );
+
+                print_key_details(&seed, &args.base, &args.owner);
 
                 if let Err(err) = save_vanity_key(&pubkey, &seed) {
                     logfather::error!("{}", err);
@@ -546,6 +549,49 @@ fn maybe_update_num_cpus(num_cpus: &mut u32) {
     }
 }
 
+fn print_key_details(seed: &[u8], base: &Pubkey, owner: &Pubkey) {
+    // 1. Print raw seed in different formats
+    println!("\nSeed Details:");
+    println!("Raw bytes: {:?}", seed);
+    println!("Hex: {}", hex::encode(seed));
+    println!("Base64: {}", base64::encode(seed));
+    println!("UTF-8: {}", String::from_utf8_lossy(seed));
+
+    // 2. Calculate and print derived address
+    let mut hasher = Sha256::new();
+    hasher.update(base.to_bytes());
+    hasher.update(seed);
+    hasher.update(owner.to_bytes());
+    let pubkey_bytes: [u8; 32] = hasher.finalize().into();
+
+    // Print address in different formats
+    println!("\nDerived Address Details:");
+    println!("Raw bytes: {:?}", pubkey_bytes);
+    println!("Hex: {}", hex::encode(&pubkey_bytes));
+    println!("Base58: {}", bs58::encode(&pubkey_bytes).into_string());
+    println!("Base64: {}", base64::encode(&pubkey_bytes));
+
+    // 3. Try to interpret as Solana keypair
+    if seed.len() >= 32 {
+        if let Ok(keypair) = Keypair::from_bytes(&seed[..32]) {
+            println!("\nInterpreted as Solana Keypair:");
+            println!("Public Key: {}", keypair.pubkey());
+            println!("Base58 Secret Key: {}", bs58::encode(keypair.secret()).into_string());
+            println!("Hex Secret Key: {}", hex::encode(keypair.secret()));
+            println!("Base64 Secret Key: {}", base64::encode(keypair.secret()));
+        }
+    }
+
+    // 4. Print validation info
+    println!("\nValidation:");
+    let encoded = fd_bs58::encode_32(pubkey_bytes);
+    println!("fd_bs58 encoded (44): {}", encoded);
+    println!("bs58 encoded: {}", bs58::encode(&pubkey_bytes).into_string());
+    if encoded != bs58::encode(&pubkey_bytes).into_string() {
+        println!("WARNING: Encoding mismatch between fd_bs58 and bs58!");
+    }
+}
+
 fn save_vanity_key(pubkey: &str, seed: &[u8]) -> Result<(), String> {
     let output_dir = PathBuf::from("keys");
     logfather::debug!("Checking output directory: {}", output_dir.display());
@@ -568,13 +614,19 @@ fn save_vanity_key(pubkey: &str, seed: &[u8]) -> Result<(), String> {
         format!("Error opening file {}: {}", output_file_path.display(), err)
     )?;
 
-    write!(
+    // Write original format
+    writeln!(
         file,
         "{} -> {:?} [{}]",
         pubkey,
         seed,
         core::str::from_utf8(seed).unwrap_or("Invalid UTF-8")
     ).map_err(|err| format!("Error writing to file {}: {}", output_file_path.display(), err))?;
+
+    // Write additional formats
+    writeln!(file, "\nSeed formats:").unwrap();
+    writeln!(file, "Hex: {}", hex::encode(seed)).unwrap();
+    writeln!(file, "Base64: {}", base64::encode(seed)).unwrap();
 
     logfather::info!("Successfully saved output to {}", output_file_path.display());
     Ok(())
