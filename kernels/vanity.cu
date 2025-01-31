@@ -10,6 +10,15 @@ __device__ bool d_case_insensitive_suffix = false;
 __device__ bool d_case_insensitive_any = false;
 __device__ bool d_leet_speak = false;
 
+__device__ char device_tolower(char c)
+{
+    if (c >= 'A' && c <= 'Z')
+    {
+        return c + ('a' - 'A');
+    }
+    return c;
+}
+
 // TODO:
 // 1) Should maybe write a macro for the err handling
 // 2) Theoretically possible to reuse device reallocs but it's only one per round so it's kind of ok
@@ -479,7 +488,7 @@ __device__ bool matches_search(
             }
             else if (d_case_insensitive_prefix)
             {
-                if (tolower(address[i]) != tolower(prefix[i]))
+                if (device_tolower(address[i]) != device_tolower(prefix[i]))
                 {
                     prefix_matches = false;
                     break;
@@ -508,7 +517,7 @@ __device__ bool matches_search(
             }
             else if (d_case_insensitive_suffix)
             {
-                if (tolower(address[44 - suffix_len + i]) != tolower(suffix[i]))
+                if (device_tolower(address[44 - suffix_len + i]) != device_tolower(suffix[i]))
                 {
                     suffix_matches = false;
                     break;
@@ -541,7 +550,7 @@ __device__ bool matches_search(
                 }
                 else if (d_case_insensitive_any)
                 {
-                    if (tolower(address[i + j]) != tolower(any[j]))
+                    if (device_tolower(address[i + j]) != device_tolower(any[j]))
                     {
                         match = false;
                         break;
