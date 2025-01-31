@@ -554,7 +554,7 @@ fn print_key_details(seed: &[u8], base: &Pubkey, owner: &Pubkey) {
     println!("\nSeed Details:");
     println!("Raw bytes: {:?}", seed);
     println!("Hex: {}", hex::encode(seed));
-    println!("Base64: {}", base64::encode(seed));
+    println!("Base64: {}", base64::engine::general_purpose::STANDARD.encode(seed));
     println!("UTF-8: {}", String::from_utf8_lossy(seed));
 
     // 2. Calculate and print derived address
@@ -569,7 +569,7 @@ fn print_key_details(seed: &[u8], base: &Pubkey, owner: &Pubkey) {
     println!("Raw bytes: {:?}", pubkey_bytes);
     println!("Hex: {}", hex::encode(&pubkey_bytes));
     println!("Base58: {}", bs58::encode(&pubkey_bytes).into_string());
-    println!("Base64: {}", base64::encode(&pubkey_bytes));
+    println!("Base64: {}", base64::engine::general_purpose::STANDARD.encode(&pubkey_bytes));
 
     // 3. Try to interpret as Solana keypair
     if seed.len() >= 32 {
@@ -578,7 +578,10 @@ fn print_key_details(seed: &[u8], base: &Pubkey, owner: &Pubkey) {
             println!("Public Key: {}", keypair.pubkey());
             println!("Base58 Secret Key: {}", bs58::encode(keypair.secret()).into_string());
             println!("Hex Secret Key: {}", hex::encode(keypair.secret()));
-            println!("Base64 Secret Key: {}", base64::encode(keypair.secret()));
+            println!(
+                "Base64 Secret Key: {}",
+                base64::engine::general_purpose::STANDARD.encode(keypair.secret())
+            );
         }
     }
 
@@ -626,7 +629,7 @@ fn save_vanity_key(pubkey: &str, seed: &[u8]) -> Result<(), String> {
     // Write additional formats
     writeln!(file, "\nSeed formats:").unwrap();
     writeln!(file, "Hex: {}", hex::encode(seed)).unwrap();
-    writeln!(file, "Base64: {}", base64::encode(seed)).unwrap();
+    writeln!(file, "Base64: {}", base64::engine::general_purpose::STANDARD.encode(seed)).unwrap();
 
     logfather::info!("Successfully saved output to {}", output_file_path.display());
     Ok(())
