@@ -377,7 +377,8 @@ vanity_search(uint8_t *buffer, uint64_t stride)
                     (unsigned char *)suffix,
                     suffix_len,
                     (unsigned char *)any,
-                    any_len))
+                    any_len,
+                    (unsigned char *)create_account_seed))
             {
                 // Are we first to write result?
                 if (atomicMax(&done, 1) == 0)
@@ -466,7 +467,8 @@ __device__ bool matches_search(
     unsigned char *suffix,
     uint64_t suffix_len,
     unsigned char *any,
-    uint64_t any_len)
+    uint64_t any_len,
+    unsigned char *out)
 {
     bool prefix_matches = true;
     bool suffix_matches = true;
