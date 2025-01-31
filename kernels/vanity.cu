@@ -5,7 +5,9 @@
 
 __device__ int done = 0;
 __device__ unsigned long long count = 0;
-__device__ bool d_case_insensitive = false;
+__device__ bool d_case_insensitive_prefix = false;
+__device__ bool d_case_insensitive_suffix = false;
+__device__ bool d_case_insensitive_any = false;
 __device__ bool d_leet_speak = false;
 
 // TODO:
@@ -23,7 +25,9 @@ extern "C" void vanity_round(
     char *any,
     uint64_t any_len,
     uint8_t *out,
-    bool case_insensitive,
+    bool case_insensitive_prefix,
+    bool case_insensitive_suffix,
+    bool case_insensitive_any,
     bool leet_speak)
 {
     int deviceCount;
@@ -152,10 +156,26 @@ extern "C" void vanity_round(
         }
     }
 
-    err = cudaMemcpyToSymbol(d_case_insensitive, &case_insensitive, 1, 0, cudaMemcpyHostToDevice);
+    err = cudaMemcpyToSymbol(d_case_insensitive_prefix, &case_insensitive_prefix, 1, 0, cudaMemcpyHostToDevice);
     if (err != cudaSuccess)
     {
-        printf("CUDA memcpy to symbol error (done): %s\n", cudaGetErrorString(err));
+        printf("CUDA memcpy to symbol error (case_insensitive_prefix): %s\n", cudaGetErrorString(err));
+        cudaFree(d_buffer);
+        return;
+    }
+
+    err = cudaMemcpyToSymbol(d_case_insensitive_suffix, &case_insensitive_suffix, 1, 0, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memcpy to symbol error (case_insensitive_suffix): %s\n", cudaGetErrorString(err));
+        cudaFree(d_buffer);
+        return;
+    }
+
+    err = cudaMemcpyToSymbol(d_case_insensitive_any, &case_insensitive_any, 1, 0, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memcpy to symbol error (case_insensitive_any): %s\n", cudaGetErrorString(err));
         cudaFree(d_buffer);
         return;
     }
@@ -336,7 +356,7 @@ vanity_search(uint8_t *buffer, uint64_t stride)
             cuda_sha256_update(&address_sha_local, (BYTE *)create_account_seed, 16);
             cuda_sha256_update(&address_sha_local, (BYTE *)(buffer + 64), 32);
             cuda_sha256_final(&address_sha_local, (BYTE *)local_out);
-            fd_base58_encode_32(local_out, (unsigned char *)(&local_encoded), d_case_insensitive);
+            fd_base58_encode_32(local_out, (unsigned char *)(&local_encoded), d_case_insensitive_prefix || d_case_insensitive_suffix || d_case_insensitive_any);
 
             // Check prefix and suffix
             // printf("Got key: %s\n", local_encoded);
@@ -457,6 +477,14 @@ __device__ bool matches_search(
                     break;
                 }
             }
+            else if (d_case_insensitive_prefix)
+            {
+                if (tolower(address[i]) != tolower(prefix[i]))
+                {
+                    prefix_matches = false;
+                    break;
+                }
+            }
             else if (address[i] != prefix[i])
             {
                 prefix_matches = false;
@@ -473,6 +501,14 @@ __device__ bool matches_search(
             if (d_leet_speak)
             {
                 if (!chars_match_leet(suffix[i], address[44 - suffix_len + i]))
+                {
+                    suffix_matches = false;
+                    break;
+                }
+            }
+            else if (d_case_insensitive_suffix)
+            {
+                if (tolower(address[44 - suffix_len + i]) != tolower(suffix[i]))
                 {
                     suffix_matches = false;
                     break;
@@ -498,6 +534,14 @@ __device__ bool matches_search(
                 if (d_leet_speak)
                 {
                     if (!chars_match_leet(any[j], address[i + j]))
+                    {
+                        match = false;
+                        break;
+                    }
+                }
+                else if (d_case_insensitive_any)
+                {
+                    if (tolower(address[i + j]) != tolower(any[j]))
                     {
                         match = false;
                         break;
@@ -544,7 +588,9 @@ __device__ bool matches_search(
         }
 
         printf("Leet speak: %s\n", d_leet_speak ? "enabled" : "disabled");
-        printf("Case insensitive: %s\n", d_case_insensitive ? "enabled" : "disabled");
+        printf("Case insensitive prefix: %s\n", d_case_insensitive_prefix ? "enabled" : "disabled");
+        printf("Case insensitive suffix: %s\n", d_case_insensitive_suffix ? "enabled" : "disabled");
+        printf("Case insensitive any: %s\n", d_case_insensitive_any ? "enabled" : "disabled");
     }
 
     return final_match;

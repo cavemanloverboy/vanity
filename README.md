@@ -69,7 +69,9 @@ Options:
   --prefix <PREFIX>            The prefix for the pubkey [default: ""]
   --suffix <SUFFIX>            The suffix for the pubkey [default: ""]
   --any <ANY>                  Search for this string anywhere in the address [default: ""]
-  --ci                        Whether to ignore case when matching
+  --ci-prefix                  Whether to ignore case when matching prefix
+  --ci-suffix                  Whether to ignore case when matching suffix
+  --ci-any                     Whether to ignore case when matching 'any' string
   --leet                      Enable leet speak matching (e.g., a=4, e=3, etc.)
   --logfile <LOGFILE>         Optional log file
   --num-cpus <NUM_CPUS>       Number of CPU threads to use [default: 0]
@@ -100,20 +102,20 @@ Options:
 # Search for an address starting with "COOL"
 vanity grind --base <PUBKEY> --owner <OWNER> --prefix COOL
 
-# Search for an address ending with "NICE"
-vanity grind --base <PUBKEY> --owner <OWNER> --suffix NICE
+# Search for an address ending with "NICE" (case insensitive)
+vanity grind --base <PUBKEY> --owner <OWNER> --suffix NICE --ci-suffix
 
-# Search for "RUST" anywhere in the address
-vanity grind --base <PUBKEY> --owner <OWNER> --any RUST
+# Search for "RUST" anywhere in the address (case insensitive)
+vanity grind --base <PUBKEY> --owner <OWNER> --any RUST --ci-any
 
 # Case-insensitive search with leet speak
-vanity grind --base <PUBKEY> --owner <OWNER> --any ELITE --ci --leet
+vanity grind --base <PUBKEY> --owner <OWNER> --any ELITE --ci-any --leet
 
-# Combined search patterns
-vanity grind --base <PUBKEY> --owner <OWNER> --prefix COOL --suffix NICE --any RUST
+# Combined search patterns with different case sensitivity
+vanity grind --base <PUBKEY> --owner <OWNER> --prefix COOL --ci-prefix --suffix NICE --any RUST --ci-any
 
 # With logging enabled
-vanity grind --base <PUBKEY> --owner <OWNER> --prefix TEST --logfile output.log
+vanity grind --base <PUBKEY> --owner <OWNER> --prefix TEST --ci-prefix --logfile output.log
 ```
 
 ### Deploying with Found Seed

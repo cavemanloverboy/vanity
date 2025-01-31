@@ -56,9 +56,17 @@ pub struct GrindArgs {
     #[clap(long, default_value = "")]
     pub any: String,
 
-    /// Whether user cares about the case of the pubkey
-    #[clap(long = "ci", default_value_t = false)]
-    pub case_insensitive: bool,
+    /// Whether to ignore case for prefix matching
+    #[clap(long = "ci-prefix", default_value_t = false)]
+    pub case_insensitive_prefix: bool,
+
+    /// Whether to ignore case for suffix matching
+    #[clap(long = "ci-suffix", default_value_t = false)]
+    pub case_insensitive_suffix: bool,
+
+    /// Whether to ignore case for 'any' matching
+    #[clap(long = "ci-any", default_value_t = false)]
+    pub case_insensitive_any: bool,
 
     /// Whether to match leet speak variants (e.g. a=4, e=3, etc)
     #[clap(long = "leet", default_value_t = false)]
@@ -280,7 +288,9 @@ fn grind(mut args: GrindArgs) {
                                 any.as_ptr(),
                                 any.len() as u64,
                                 out.as_mut_ptr(),
-                                args.case_insensitive,
+                                args.case_insensitive_prefix,
+                                args.case_insensitive_suffix,
+                                args.case_insensitive_any,
                                 args.leet_speak
                             );
                         }
@@ -310,7 +320,9 @@ fn grind(mut args: GrindArgs) {
                             prefix,
                             suffix,
                             any,
-                            args.case_insensitive,
+                            args.case_insensitive_prefix,
+                            args.case_insensitive_suffix,
+                            args.case_insensitive_any,
                             args.leet_speak
                         );
 
@@ -322,10 +334,26 @@ fn grind(mut args: GrindArgs) {
                             logfather::error!("  Prefix: '{}'", prefix);
                             logfather::error!("  Suffix: '{}'", suffix);
                             logfather::error!("  Any: '{}'", any);
-                            logfather::error!("  Case insensitive: {}", if args.case_insensitive {
-                                "enabled"
+                            logfather::error!("  Case insensitive: {}", if
+                                args.case_insensitive_prefix
+                            {
+                                "prefix enabled"
                             } else {
-                                "disabled"
+                                "prefix disabled"
+                            });
+                            logfather::error!("  Case insensitive: {}", if
+                                args.case_insensitive_suffix
+                            {
+                                "suffix enabled"
+                            } else {
+                                "suffix disabled"
+                            });
+                            logfather::error!("  Case insensitive: {}", if
+                                args.case_insensitive_any
+                            {
+                                "any enabled"
+                            } else {
+                                "any disabled"
                             });
                             logfather::error!("  Leet speak: {}", if args.leet_speak {
                                 "enabled"
@@ -392,7 +420,9 @@ fn grind(mut args: GrindArgs) {
                     prefix,
                     suffix,
                     any,
-                    args.case_insensitive,
+                    args.case_insensitive_prefix,
+                    args.case_insensitive_suffix,
+                    args.case_insensitive_any,
                     args.leet_speak
                 )
             {
@@ -451,9 +481,9 @@ fn get_validated_strings(args: &GrindArgs) -> (&'static str, &'static str, &'sta
     let any: String = args.any.chars().map(convert_to_valid_bs58).collect();
 
     // bs58-aware lowercase conversion for all strings
-    let prefix = maybe_bs58_aware_lowercase(&prefix, args.case_insensitive);
-    let suffix = maybe_bs58_aware_lowercase(&suffix, args.case_insensitive);
-    let any = maybe_bs58_aware_lowercase(&any, args.case_insensitive);
+    let prefix = maybe_bs58_aware_lowercase(&prefix, args.case_insensitive_prefix);
+    let suffix = maybe_bs58_aware_lowercase(&suffix, args.case_insensitive_suffix);
+    let any = maybe_bs58_aware_lowercase(&any, args.case_insensitive_any);
 
     (prefix.leak(), suffix.leak(), any.leak())
 }
@@ -487,7 +517,9 @@ extern "C" {
         any: *const u8,
         any_len: u64,
         out: *mut u8,
-        case_insensitive: bool,
+        case_insensitive_prefix: bool,
+        case_insensitive_suffix: bool,
+        case_insensitive_any: bool,
         leet_speak: bool
     );
 
@@ -703,7 +735,9 @@ fn matches_vanity_key(
     prefix: &str,
     suffix: &str,
     any: &str,
-    case_insensitive: bool,
+    case_insensitive_prefix: bool,
+    case_insensitive_suffix: bool,
+    case_insensitive_any: bool,
     leet_speak: bool
 ) -> bool {
     logfather::debug!("\nRust checking address: {}", pubkey_str);
@@ -711,14 +745,24 @@ fn matches_vanity_key(
     logfather::debug!("  Prefix: '{}' (len={})", prefix, prefix.len());
     logfather::debug!("  Suffix: '{}' (len={})", suffix, suffix.len());
     logfather::debug!("  Any: '{}' (len={})", any, any.len());
-    logfather::debug!("  Case insensitive: {}", if case_insensitive {
-        "enabled"
+    logfather::debug!("  Case insensitive: {}", if case_insensitive_prefix {
+        "prefix enabled"
     } else {
-        "disabled"
+        "prefix disabled"
+    });
+    logfather::debug!("  Case insensitive: {}", if case_insensitive_suffix {
+        "suffix enabled"
+    } else {
+        "suffix disabled"
+    });
+    logfather::debug!("  Case insensitive: {}", if case_insensitive_any {
+        "any enabled"
+    } else {
+        "any disabled"
     });
     logfather::debug!("  Leet speak: {}", if leet_speak { "enabled" } else { "disabled" });
 
-    let check_str = if case_insensitive {
+    let check_str = if case_insensitive_prefix {
         maybe_bs58_aware_lowercase(pubkey_str, true)
     } else {
         pubkey_str.to_string()
