@@ -23,6 +23,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::Instant,
 };
+use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Parser)]
 pub enum Command {
@@ -60,6 +61,10 @@ pub struct GrindArgs {
     /// Number of cpu threads to use for mining
     #[clap(long, default_value_t = 0)]
     pub num_cpus: u32,
+
+    /// Number of addresses to find
+    #[clap(long, default_value_t = 1)]
+    pub count: u8,
 }
 
 #[derive(Debug, Parser)]
@@ -232,9 +237,13 @@ fn grind(mut args: GrindArgs) {
     #[cfg(feature = "gpu")]
     logfather::info!("using {} gpus", args.num_gpus);
 
+    // Create an arc mutex for the count of found values
+    let found_count = Arc::new(Mutex::new(0_u8));
+
     #[cfg(feature = "gpu")]
     let _gpu_threads: Vec<_> = (0..args.num_gpus)
-        .map(move |gpu_index| {
+        .map(|gpu_index| {
+            let gpu_found_count = found_count.clone();
             std::thread::Builder::new()
                 .name(format!("gpu{gpu_index}"))
                 .spawn(move || {
@@ -276,9 +285,15 @@ fn grind(mut args: GrindArgs) {
 
                         if out_str_target_check.starts_with(target) {
                             logfather::info!("out seed = {out:?} -> {}", core::str::from_utf8(&out[..16]).unwrap());
-                            EXIT.store(true, Ordering::SeqCst);
-                            logfather::trace!("gpu thread {gpu_index} exiting");
-                            return;
+
+                            // Increment found count and check if we're done
+                            let mut count = gpu_found_count.lock().unwrap();
+                            *count += 1;
+                            if *count >= args.count {
+                                EXIT.store(true, Ordering::SeqCst);
+                                logfather::trace!("gpu thread {gpu_index} exiting");
+                                return;
+                            }
                         }
                     }
                 })
@@ -321,8 +336,13 @@ fn grind(mut args: GrindArgs) {
                     ((count as f64 / time_secs) as u64).to_formatted_string(&Locale::en)
                 );
 
-                EXIT.store(true, Ordering::Release);
-                break;
+                // Increment found count and check if we're done
+                let mut count = found_count.lock().unwrap();
+                *count += 1;
+                if *count >= args.count {
+                    EXIT.store(true, Ordering::Release);
+                    break;
+                }
             }
         }
     });
