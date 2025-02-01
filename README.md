@@ -31,7 +31,8 @@ Usage: vanity [OPTIONS] --base <BASE> --owner <OWNER> --target <TARGET>
 Options:
       --base <BASE>          The pubkey that will be the signer for the CreateAccountWithSeed instruction
       --owner <OWNER>        The account owner, e.g. BPFLoaderUpgradeab1e11111111111111111111111 or TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
-      --target <TARGET>      The target prefix for the pubkey
+      --prefix <PREFIX>      The target prefix for the pubkey
+      --suffix <SUFFIX>      The target suffix for the pubkey (NOTE: not supported for GPU)
       --case-insensitive     Whether user cares about the case of the pubkey
       --logfile <LOGFILE>    Optional log file
       --num-cpus <NUM_CPUS>  Number of cpu threads to use for mining [default: 0]
