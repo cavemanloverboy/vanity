@@ -288,8 +288,8 @@ fn grind(mut args: GrindArgs) {
                             logfather::info!("out seed = {out:?} -> {}", core::str::from_utf8(&out[..16]).unwrap());
 
                             // Increment found count and check if we're done
-                            let count = gpu_found_count.fetch_add(1, Ordering::SeqCst);
-                            if count >= args.count {
+                            let prev_count = gpu_found_count.fetch_add(1, Ordering::SeqCst);
+                            if prev_count + 1 >= args.count {
                                 EXIT.store(true, Ordering::SeqCst);
                                 logfather::trace!("gpu thread {gpu_index} exiting");
                                 return;
@@ -338,8 +338,8 @@ fn grind(mut args: GrindArgs) {
                 );
 
                 // Increment found count and check if we're done
-                let count = cpu_found_count.fetch_add(1, Ordering::SeqCst);
-                if count >= args.count {
+                let prev_count = cpu_found_count.fetch_add(1, Ordering::SeqCst);
+                if prev_count + 1 >= args.count {
                     EXIT.store(true, Ordering::Release);
                     break;
                 }
