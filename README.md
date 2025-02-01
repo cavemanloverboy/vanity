@@ -35,6 +35,7 @@ Options:
       --case-insensitive     Whether user cares about the case of the pubkey
       --logfile <LOGFILE>    Optional log file
       --num-cpus <NUM_CPUS>  Number of cpu threads to use for mining [default: 0]
+      --count <COUNT>        Number of addresses to find [default: 1]
   -h, --help                 Print help
 ```
 
