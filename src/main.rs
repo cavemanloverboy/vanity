@@ -44,9 +44,9 @@ pub struct GrindArgs {
     #[clap(long)]
     pub prefix: Option<String>,
 
-    /// The target postfix for the pubkey
+    /// The target suffix for the pubkey
     #[clap(long)]
-    pub postfix: Option<String>,
+    pub suffix: Option<String>,
 
     /// Whether user cares about the case of the pubkey
     #[clap(long, default_value_t = false)]
@@ -223,20 +223,20 @@ fn grind(mut args: GrindArgs) {
         None
     };
 
-    let postfix = if let Some(postfix) = &args.postfix {
-        Some(get_validated_target(postfix, args.case_insensitive))
+    let suffix = if let Some(suffix) = &args.suffix {
+        Some(get_validated_target(suffix, args.case_insensitive))
     } else {
         None
     };
 
     assert!(
-        prefix.is_some() || postfix.is_some(),
-        "you must supply a prefix and/or postfix",
+        prefix.is_some() || suffix.is_some(),
+        "you must supply a prefix and/or suffix",
     );
 
     #[cfg(feature = "gpu")]
     assert!(
-        prefix.is_some() && postfix.is_none(),
+        prefix.is_some() && suffix.is_none(),
         "gpu grind only supports prefix"
     );
 
@@ -343,14 +343,14 @@ fn grind(mut args: GrindArgs) {
                 true
             };
 
-            // Did cpu find postfix?
-            let postfix_good = if let Some(postfix) = postfix {
-                out_str_target_check.ends_with(postfix)
+            // Did cpu find suffix?
+            let suffix_good = if let Some(suffix) = suffix {
+                out_str_target_check.ends_with(suffix)
             } else {
                 true
             };
 
-            if prefix_good && postfix_good {
+            if prefix_good && suffix_good {
                 let time_secs = timer.elapsed().as_secs_f64();
                 logfather::info!(
                     "cpu {i} found target: {pubkey}; {seed:?} -> {} in {:.3}s; {} attempts; {} attempts per second",
@@ -378,7 +378,7 @@ fn get_validated_target(target: &str, case_insensitive: bool) -> &'static str {
     for c in target.chars() {
         assert!(
             BS58_CHARS.contains(c),
-            "your prefix or postfix contains invalid bs58: {}",
+            "your prefix or suffix contains invalid bs58: {}",
             c
         );
     }
