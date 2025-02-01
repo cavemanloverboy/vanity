@@ -16,6 +16,8 @@ use solana_sdk::{
     transaction::Transaction,
 };
 
+use std::sync::atomic::AtomicU16;
+use std::sync::Arc;
 use std::{
     array,
     path::PathBuf,
@@ -23,8 +25,6 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::Instant,
 };
-use std::sync::Arc;
-use std::sync::atomic::AtomicU8;
 
 #[derive(Debug, Parser)]
 pub enum Command {
@@ -65,7 +65,7 @@ pub struct GrindArgs {
 
     /// Number of addresses to find
     #[clap(long, default_value_t = 1)]
-    pub count: u8,
+    pub count: u16,
 }
 
 #[derive(Debug, Parser)]
@@ -239,7 +239,7 @@ fn grind(mut args: GrindArgs) {
     logfather::info!("using {} gpus", args.num_gpus);
 
     // Create an atomic counter for the count of found values
-    let found_count = Arc::new(AtomicU8::new(0));
+    let found_count = Arc::new(AtomicU16::new(0));
 
     #[cfg(feature = "gpu")]
     let _gpu_threads: Vec<_> = (0..args.num_gpus)
