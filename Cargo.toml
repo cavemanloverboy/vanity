@@ -10,8 +10,8 @@ license = "MIT OR Apache-2.0"
 description = "A *bLaZinGlY fAsT* tool for grinding vanity addresses on Solana"
 
 [features]
+default = ["gpu"]
 gpu = ["cc"]
-default = []
 
 [profile.release]
 lto = "fat"
@@ -29,6 +29,7 @@ sha2 = "0.10.8"
 solana-pubkey = "2.1.0"
 solana-rpc-client = "2.1.0"
 solana-sdk = "2.1.0"
+bs58 = "0.5.1"
 
 [build-dependencies]
 cc = { version = "1.0.98", optional = true }

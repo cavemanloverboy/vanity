@@ -1,67 +1,188 @@
 # `vanity`
 
-A *bLaZinGlY fAsT* tool for grinding vanity addresses on Solana.
+A _bLaZinGlY fAsT_ tool for grinding vanity addresses on Solana.
 
-## 1) What
+> **Note**: This project (+ the readme) was generated with the assistance of AI (Claude) in Cursor.
 
-Typically, solana developers wishing to obtain a vanity address for their program or token grind out ed25519 keypairs and sign off on a `SystemInstruction::CreateAccount` instruction. However, by using `SystemInstruction::CreateAccountWithSeed`, developers can bypass ed25519 and get extreme speedups on address searches. Although not as generic, this method covers many use cases.
+## Features
 
-## 2) H
+### Core Features
 
-By default, vanity compiles for cpu. Install via
+- Multi-GPU support with automatic device detection and optimization
+- Multi-threaded CPU support with automatic thread count detection
+- Automatic compute capability detection for optimal GPU performance
+- Base58-aware case-insensitive matching
+- Smart leet speak transformations with bidirectional matching
+- Flexible search patterns:
+  - Prefix matching (start of address)
+  - Suffix matching (end of address)
+  - Anywhere matching (substring in address)
+  - Combinations of all three patterns
+
+### Search Capabilities
+
+- Case-sensitive and case-insensitive matching
+- Bidirectional leet speak transformations (e.g., both 'a' → '4' and '4' → 'a')
+- Smart character mapping for invalid Base58 characters:
+  - '0' → 'o'
+  - 'I' → '1'
+  - 'O' → 'o'
+  - 'l' → 'L'
+- Automatic validation of search strings
+- Real-time performance metrics and progress reporting
+
+### Output and Logging
+
+- Detailed logging with configurable log files
+- Performance statistics:
+  - Iterations per second
+  - Time to find matches
+  - GPU/CPU utilization
+- Automatic key saving:
+  - Saves found addresses and seeds
+  - Human-readable format
+  - Organized file structure
+- Validation mismatch detection and debugging
+
+### Deployment Support
+
+- Direct program deployment with found seeds
+- Flexible deployment options:
+  - Custom RPC endpoints
+  - Separate payer accounts
+  - Configurable program authority
+  - Compute unit price adjustment
+- Support for BPF Loader Upgradeable programs
+
+## Usage
+
+The tool has two main commands: `grind` and `deploy`.
+
+### Grinding Addresses
 
 ```bash
-cargo install vanity
-```
-
-To compile for gpu, install via
-
-```bash
-cargo install vanity --features=gpu
-```
-If you don't have a GPU, consider using [vast.ai](https://cloud.vast.ai/?ref_id=126830). Pls use this referral link so that I can keep using GPUs.
-
-
-Refer to the help via `vanity --help` for information on usage.
-
-```bash
-
-Usage: vanity [OPTIONS] --base <BASE> --owner <OWNER> --target <TARGET>
+vanity grind [OPTIONS] --base <BASE> --owner <OWNER>
 
 Options:
-      --base <BASE>          The pubkey that will be the signer for the CreateAccountWithSeed instruction
-      --owner <OWNER>        The account owner, e.g. BPFLoaderUpgradeab1e11111111111111111111111 or TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
-      --target <TARGET>      The target prefix for the pubkey
-      --case-insensitive     Whether user cares about the case of the pubkey
-      --logfile <LOGFILE>    Optional log file
-      --num-cpus <NUM_CPUS>  Number of cpu threads to use for mining [default: 0]
-  -h, --help                 Print help
+  --base <BASE>                The pubkey that will be the signer for CreateAccountWithSeed
+  --owner <OWNER>              The account owner (e.g., BPFLoaderUpgradeab1e11111111111111111111111)
+  --prefix <PREFIX>            The prefix for the pubkey [default: ""]
+  --suffix <SUFFIX>            The suffix for the pubkey [default: ""]
+  --any <ANY>                  Search for this string anywhere in the address [default: ""]
+  --ci-prefix                  Whether to ignore case when matching prefix
+  --ci-suffix                  Whether to ignore case when matching suffix
+  --ci-any                     Whether to ignore case when matching 'any' string
+  --leet                      Enable leet speak matching (e.g., a=4, e=3, etc.)
+  --logfile <LOGFILE>         Optional log file
+  --num-cpus <NUM_CPUS>       Number of CPU threads to use [default: 0]
 ```
 
-To actually make use of the resulting seed, refer to the `solana_program` docs:
+### Deploying Programs
 
-```rust
-pub fn create_account_with_seed(
-    from_pubkey: &Pubkey,
-    // this is the resulting address, obtained via Pubkey::create_with_seed
-    to_pubkey: &Pubkey, 
-    base: &Pubkey,
-    seed: &str,
-    lamports: u64,
-    space: u64,
-    owner: &Pubkey,
-) -> Instruction
+```bash
+vanity deploy [OPTIONS] --base <BASE> --owner <OWNER> --buffer <BUFFER> --seed <SEED>
+
+Options:
+  --base <BASE>               Path to base keypair file
+  --rpc <RPC>                 RPC URL [default: "https://api.mainnet-beta.solana.com"]
+  --owner <OWNER>             Program owner (usually BPFLoaderUpgradeab1e11111111111111111111111)
+  --buffer <BUFFER>           Buffer address containing program data
+  --payer <PAYER>             Optional separate payer keypair
+  --seed <SEED>               Seed found during grinding
+  --authority <AUTHORITY>     Program authority (defaults to payer)
+  --compute-unit-price <CU>   Optional compute unit price
+  --logfile <LOGFILE>         Optional log file
 ```
 
-## Contributions
+## Examples
 
-yes
+### Finding a Vanity Address
 
-## Performance
+```bash
+# Search for an address starting with "COOL"
+vanity grind --base <PUBKEY> --owner <OWNER> --prefix COOL
 
-one of y'all can fill this out. RTX 4090 does ≈1 billion address searches per second.
+# Search for an address ending with "NICE" (case insensitive)
+vanity grind --base <PUBKEY> --owner <OWNER> --suffix NICE --ci-suffix
 
-## Acknowledgements, External Libraries
+# Search for "RUST" anywhere in the address (case insensitive)
+vanity grind --base <PUBKEY> --owner <OWNER> --any RUST --ci-any
 
-- The sha2 implementation used in this library is taken from [here](https://github.com/mochimodev/cuda-hashing-algos), which is in the public domain.
-- The base58 encoding implementation is taken from firedancer with heavy modifications for use in cuda & case insensitive encodings, licensed under APACHE-2.0
+# Case-insensitive search with leet speak
+vanity grind --base <PUBKEY> --owner <OWNER> --any ELITE --ci-any --leet
+
+# Combined search patterns with different case sensitivity
+vanity grind --base <PUBKEY> --owner <OWNER> --prefix COOL --ci-prefix --suffix NICE --any RUST --ci-any
+
+# With logging enabled
+vanity grind --base <PUBKEY> --owner <OWNER> --prefix TEST --ci-prefix --logfile output.log
+```
+
+### Deploying with Found Seed
+
+```bash
+# Basic deployment
+vanity deploy --base keypair.json --owner BPFLoaderUpgradeab1e11111111111111111111111 \
+  --buffer <BUFFER_PUBKEY> --seed <FOUND_SEED>
+
+# Deployment with custom RPC and payer
+vanity deploy --base keypair.json --owner BPFLoaderUpgradeab1e11111111111111111111111 \
+  --buffer <BUFFER_PUBKEY> --seed <FOUND_SEED> \
+  --rpc "https://api.devnet.solana.com" \
+  --payer payer_keypair.json \
+  --compute-unit-price 1000
+```
+
+## Technical Details
+
+### Base58 Character Set
+
+The tool uses the standard Base58 character set:
+
+```
+123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz
+```
+
+### Character Mapping
+
+Invalid characters are automatically mapped to valid Base58 equivalents:
+
+- '0' → 'o'
+- 'I' → '1'
+- 'O' → 'o'
+- 'l' → '1'
+
+### Leet Speak Transformations
+
+The following bidirectional character transformations are supported:
+
+- a/A ↔ 4
+- e/E ↔ 3
+- t/T ↔ 7
+- l/L/i/I ↔ 1
+- s/S ↔ 5
+- g/G ↔ 6
+- b/B ↔ 8
+- z/Z ↔ 2
+
+### Performance
+
+Performance varies by hardware. The tool automatically:
+
+- Detects available GPUs
+- Optimizes for each GPU's compute capability
+- Utilizes all available GPU cores
+- Adjusts CPU thread count based on system capabilities
+
+### Output Format
+
+Found addresses are saved in the following format:
+
+```
+<address> -> [seed_bytes] [seed_utf8]
+```
+
+## Acknowledgements
+
+- SHA256 implementation from [cuda-hashing-algos](https://github.com/mochimodev/cuda-hashing-algos) (public domain)
+- Base58 encoding adapted from firedancer (APACHE-2.0)
