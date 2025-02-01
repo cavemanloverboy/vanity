@@ -23,7 +23,8 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::Instant,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::atomic::AtomicU8;
 
 #[derive(Debug, Parser)]
 pub enum Command {
@@ -237,8 +238,8 @@ fn grind(mut args: GrindArgs) {
     #[cfg(feature = "gpu")]
     logfather::info!("using {} gpus", args.num_gpus);
 
-    // Create an arc mutex for the count of found values
-    let found_count = Arc::new(Mutex::new(0_u8));
+    // Create an atomic counter for the count of found values
+    let found_count = Arc::new(AtomicU8::new(0));
 
     #[cfg(feature = "gpu")]
     let _gpu_threads: Vec<_> = (0..args.num_gpus)
@@ -287,9 +288,8 @@ fn grind(mut args: GrindArgs) {
                             logfather::info!("out seed = {out:?} -> {}", core::str::from_utf8(&out[..16]).unwrap());
 
                             // Increment found count and check if we're done
-                            let mut count = gpu_found_count.lock().unwrap();
-                            *count += 1;
-                            if *count >= args.count {
+                            let count = gpu_found_count.fetch_add(1, Ordering::SeqCst);
+                            if count >= args.count {
                                 EXIT.store(true, Ordering::SeqCst);
                                 logfather::trace!("gpu thread {gpu_index} exiting");
                                 return;
@@ -306,6 +306,7 @@ fn grind(mut args: GrindArgs) {
         let mut count = 0_u64;
 
         let base_sha = Sha256::new().chain_update(args.base);
+        let cpu_found_count = found_count.clone();
         loop {
             if EXIT.load(Ordering::Acquire) {
                 return;
@@ -337,9 +338,8 @@ fn grind(mut args: GrindArgs) {
                 );
 
                 // Increment found count and check if we're done
-                let mut count = found_count.lock().unwrap();
-                *count += 1;
-                if *count >= args.count {
+                let count = cpu_found_count.fetch_add(1, Ordering::SeqCst);
+                if count >= args.count {
                     EXIT.store(true, Ordering::Release);
                     break;
                 }
