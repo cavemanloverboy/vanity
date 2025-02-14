@@ -42,7 +42,11 @@ pub struct GrindArgs {
 
     /// The target prefix for the pubkey
     #[clap(long)]
-    pub target: String,
+    pub prefix: Option<String>,
+
+    /// The target suffix for the pubkey
+    #[clap(long)]
+    pub suffix: Option<String>,
 
     /// Whether user cares about the case of the pubkey
     #[clap(long, default_value_t = false)]
@@ -213,7 +217,28 @@ pub fn deploy_with_max_program_len_with_seed(
 fn grind(mut args: GrindArgs) {
     maybe_update_num_cpus(&mut args.num_cpus);
 
-    let target = get_validated_target(&args);
+    let prefix = if let Some(prefix) = &args.prefix {
+        Some(get_validated_target(prefix, args.case_insensitive))
+    } else {
+        None
+    };
+
+    let suffix = if let Some(suffix) = &args.suffix {
+        Some(get_validated_target(suffix, args.case_insensitive))
+    } else {
+        None
+    };
+
+    assert!(
+        prefix.is_some() || suffix.is_some(),
+        "you must supply a prefix and/or suffix",
+    );
+
+    #[cfg(feature = "gpu")]
+    assert!(
+        prefix.is_some() && suffix.is_none(),
+        "gpu grind only supports prefix"
+    );
 
     // Initialize logger with optional logfile
     let mut logger = Logger::new();
@@ -235,6 +260,7 @@ fn grind(mut args: GrindArgs) {
     #[cfg(feature = "gpu")]
     let _gpu_threads: Vec<_> = (0..args.num_gpus)
         .map(move |gpu_index| {
+            let target = prefix.unwrap();
             std::thread::Builder::new()
                 .name(format!("gpu{gpu_index}"))
                 .spawn(move || {
@@ -310,8 +336,21 @@ fn grind(mut args: GrindArgs) {
 
             count += 1;
 
-            // Did cpu find target?
-            if out_str_target_check.starts_with(target) {
+            // Did cpu find prefix?
+            let prefix_good = if let Some(prefix) = prefix {
+                out_str_target_check.starts_with(prefix)
+            } else {
+                true
+            };
+
+            // Did cpu find suffix?
+            let suffix_good = if let Some(suffix) = suffix {
+                out_str_target_check.ends_with(suffix)
+            } else {
+                true
+            };
+
+            if prefix_good && suffix_good {
                 let time_secs = timer.elapsed().as_secs_f64();
                 logfather::info!(
                     "cpu {i} found target: {pubkey}; {seed:?} -> {} in {:.3}s; {} attempts; {} attempts per second",
@@ -328,7 +367,7 @@ fn grind(mut args: GrindArgs) {
     });
 }
 
-fn get_validated_target(args: &GrindArgs) -> &'static str {
+fn get_validated_target(target: &str, case_insensitive: bool) -> &'static str {
     // Static string of BS58 characters
     const BS58_CHARS: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
@@ -336,16 +375,16 @@ fn get_validated_target(args: &GrindArgs) -> &'static str {
     //
     // maybe TODO: technically we could accept I or o if case-insensitivity but I suspect
     // most users will provide lowercase targets for case-insensitive searches
-    for c in args.target.chars() {
+    for c in target.chars() {
         assert!(
             BS58_CHARS.contains(c),
-            "your target contains invalid bs58: {}",
+            "your prefix or suffix contains invalid bs58: {}",
             c
         );
     }
 
     // bs58-aware lowercase converison
-    let target = maybe_bs58_aware_lowercase(&args.target, args.case_insensitive);
+    let target = maybe_bs58_aware_lowercase(target, case_insensitive);
 
     target.leak()
 }
