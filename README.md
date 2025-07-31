@@ -52,10 +52,28 @@ pub fn create_account_with_seed(
     owner: &Pubkey,
 ) -> Instruction
 ```
+## Estimated Number of Attempts Needed for Each Prefix Length
+
+| Prefix | Avg** Attempts (Case Sensitive) | Attempts 90% (Case Sensitive) | Avg** Attempts (Case Insensitive) | Attempts 90% (Case Insensitive) | Est Time CS*     | Est Time CI*    |
+|--------|-------------------------------|-------------------------------|----------------------------------|----------------------------------|------------------|----------------|
+| 1      | 58                            | 132                           | 33                               | 77                               | <1 ms            | <1 ms          |
+| 2      | 3 thousand                    | 8 thousand                    | 1 thousand                       | 2 thousand                       | <1 ms            | <1 ms          |
+| 3      | 195 thousand                  | 449 thousand                  | 39 thousand                      | 90 thousand                      | <1 ms            | <1 ms          |
+| 4      | 11 million                    | 26 million                    | 1.3 million                      | 3 million                        | 9 ms             | 1 ms           |
+| 5      | 656 million                   | 1.5 billion                   | 45 million                       | 104 million                      | 0.55 sec         | 38 ms          |
+| 6      | 38 billion                    | 87 billion                    | 1.5 billion                      | 3.5 billion                      | 31.7 sec         | 1.25 sec       |
+| 7      | 2.2 trillion                  | 5 trillion                    | 52.5 billion                     | 120.9 billion                    | 30.6 min         | 43.8 sec       |
+| 8      | 128.6 trillion                | 296.2 trillion                | 1.78 trillion                    | 4.1 trillion                     | 29.7 hr          | 24.7 min       |
+| 9      | 9 quadrillion                 | 20 quadrillion                | 60 trillion                      | 140 trillion                     | 86.8 days        | 13.9 hr        |
+
+*On avg for 1x RTX 4090.  
+**≈63%
+
+#### Note: None of this is guaranteed; it can theoretically take an infinite amount of time to find any vanity address. Have this in mind.
 
 ## Contributions
 
-yes
+Yes
 
 ## Performance
 
