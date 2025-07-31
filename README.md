@@ -25,13 +25,13 @@ If you don't have a GPU, consider using [vast.ai](https://cloud.vast.ai/?ref_id=
 Refer to the help via `vanity --help` for information on usage.
 
 ```bash
-
-Usage: vanity [OPTIONS] --base <BASE> --owner <OWNER> --target <TARGET>
+Usage: vanity grind [OPTIONS] --base <BASE> --owner <OWNER>
 
 Options:
       --base <BASE>          The pubkey that will be the signer for the CreateAccountWithSeed instruction
       --owner <OWNER>        The account owner, e.g. BPFLoaderUpgradeab1e11111111111111111111111 or TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
-      --target <TARGET>      The target prefix for the pubkey
+      --prefix <PREFIX>      The target prefix for the pubkey
+      --suffix <SUFFIX>      The target suffix for the pubkey
       --case-insensitive     Whether user cares about the case of the pubkey
       --logfile <LOGFILE>    Optional log file
       --num-cpus <NUM_CPUS>  Number of cpu threads to use for mining [default: 0]
