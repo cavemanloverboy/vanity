@@ -1,4 +1,5 @@
 use clap::Parser;
+use ed25519_dalek::SigningKey;
 use logfather::{Level, Logger};
 use num_format::{Locale, ToFormattedString};
 use rand::{distributions::Alphanumeric, Rng};
@@ -23,13 +24,14 @@ use {
 use std::{
     array,
     str::FromStr,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicU32, Ordering},
     time::Instant,
 };
 
 #[derive(Debug, Parser)]
 pub enum Command {
     Grind(GrindArgs),
+    GrindKeypair(GrindKeypairArgs),
     Verify(VerifyArgs),
     #[cfg(feature = "deploy")]
     Deploy(DeployArgs),
@@ -68,6 +70,42 @@ pub struct GrindArgs {
     /// Number of cpu threads to use for mining
     #[clap(long, default_value_t = 0)]
     pub num_cpus: u32,
+
+    /// Number of matching addresses to find before stopping
+    #[clap(long, default_value_t = 1)]
+    pub count: u32,
+}
+
+#[derive(Debug, Parser)]
+pub struct GrindKeypairArgs {
+    /// The target prefix for the pubkey
+    #[clap(long)]
+    pub prefix: Option<String>,
+
+    /// The target suffix for the pubkey
+    #[clap(long)]
+    pub suffix: Option<String>,
+
+    /// Whether user cares about the case of the pubkey
+    #[clap(long, default_value_t = false)]
+    pub case_insensitive: bool,
+
+    /// Optional log file
+    #[clap(long)]
+    pub logfile: Option<String>,
+
+    /// Number of gpus to use for mining
+    #[clap(long, default_value_t = 1)]
+    #[cfg(feature = "gpu")]
+    pub num_gpus: u32,
+
+    /// Number of cpu threads to use for mining
+    #[clap(long, default_value_t = 0)]
+    pub num_cpus: u32,
+
+    /// Number of matching keypairs to find before stopping
+    #[clap(long, default_value_t = 1)]
+    pub count: u32,
 }
 
 #[derive(Debug, Parser)]
@@ -125,7 +163,11 @@ pub struct DeployArgs {
     pub logfile: Option<String>,
 }
 
-static EXIT: AtomicBool = AtomicBool::new(false);
+static FOUND: AtomicU32 = AtomicU32::new(0);
+
+fn done(target: u32) -> bool {
+    FOUND.load(Ordering::SeqCst) >= target
+}
 
 fn main() {
     rayon::ThreadPoolBuilder::new().build_global().unwrap();
@@ -135,6 +177,10 @@ fn main() {
     match command {
         Command::Grind(args) => {
             grind(args);
+        }
+
+        Command::GrindKeypair(args) => {
+            grind_keypair(args);
         }
 
         Command::Verify(args) => {
@@ -274,6 +320,8 @@ fn grind(mut args: GrindArgs) {
     #[cfg(feature = "gpu")]
     logfather::info!("using {} gpus", args.num_gpus);
 
+    let target_count = args.count;
+
     #[cfg(feature = "gpu")]
     let _gpu_threads: Vec<_> = (0..args.num_gpus)
         .map(move |gpu_index| {
@@ -284,13 +332,11 @@ fn grind(mut args: GrindArgs) {
 
                     let mut out = [0; 24];
                     for iteration in 0_u64.. {
-                        // Exit if a thread found a solution
-                        if EXIT.load(Ordering::SeqCst) {
+                        if done(target_count) {
                             logfather::trace!("gpu thread {gpu_index} exiting");
                             return;
                         }
 
-                        // Generate new seed for this gpu & iteration
                         let seed = new_gpu_seed(gpu_index, iteration);
                         let timer = Instant::now();
                         unsafe {
@@ -298,7 +344,6 @@ fn grind(mut args: GrindArgs) {
                         }
                         let time_sec = timer.elapsed().as_secs_f64();
 
-                        // Reconstruct solution
                         let reconstructed: [u8; 32] = Sha256::new()
                             .chain_update(&args.base)
                             .chain_update(&out[..16])
@@ -318,9 +363,7 @@ fn grind(mut args: GrindArgs) {
 
                         if out_str_target_check.starts_with(prefix) && out_str_target_check.ends_with(suffix) {
                             logfather::info!("out seed = {out:?} -> {}", core::str::from_utf8(&out[..16]).unwrap());
-                            EXIT.store(true, Ordering::SeqCst);
-                            logfather::trace!("gpu thread {gpu_index} exiting");
-                            return;
+                            FOUND.fetch_add(1, Ordering::SeqCst);
                         }
                     }
                 })
@@ -334,7 +377,7 @@ fn grind(mut args: GrindArgs) {
 
         let base_sha = Sha256::new().chain_update(args.base);
         loop {
-            if EXIT.load(Ordering::Acquire) {
+            if done(target_count) {
                 return;
             }
 
@@ -352,7 +395,6 @@ fn grind(mut args: GrindArgs) {
 
             count += 1;
 
-            // Did cpu find target?
             if out_str_target_check.starts_with(prefix) && out_str_target_check.ends_with(suffix) {
                 let time_secs = timer.elapsed().as_secs_f64();
                 logfather::info!(
@@ -363,11 +405,144 @@ fn grind(mut args: GrindArgs) {
                     ((count as f64 / time_secs) as u64).to_formatted_string(&Locale::en)
                 );
 
-                EXIT.store(true, Ordering::Release);
-                break;
+                FOUND.fetch_add(1, Ordering::SeqCst);
+                if done(target_count) {
+                    break;
+                }
             }
         }
     });
+}
+
+fn grind_keypair(mut args: GrindKeypairArgs) {
+    maybe_update_num_cpus(&mut args.num_cpus);
+    let prefix = get_validated_bs58("prefix", &args.prefix, args.case_insensitive);
+    let suffix = get_validated_bs58("suffix", &args.suffix, args.case_insensitive);
+
+    let mut logger = Logger::new();
+    if let Some(ref logfile) = args.logfile {
+        logger.file(true);
+        logger.path(logfile);
+    }
+    logger.log_format("[{timestamp} {level}] {message}");
+    logger.timestamp_format("%Y-%m-%d %H:%M:%S");
+    logger.level(Level::Info);
+
+    let target_count = args.count;
+
+    logfather::info!("grind-keypair: using {} threads", args.num_cpus);
+    #[cfg(feature = "gpu")]
+    logfather::info!("grind-keypair: using {} gpus", args.num_gpus);
+
+    #[cfg(feature = "gpu")]
+    let _gpu_threads: Vec<_> = (0..args.num_gpus)
+        .map(move |gpu_index| {
+            std::thread::Builder::new()
+                .name(format!("kp_gpu{gpu_index}"))
+                .spawn(move || {
+                    let mut out = [0u8; 40];
+                    for iteration in 0_u64.. {
+                        if done(target_count) {
+                            return;
+                        }
+
+                        let seed = new_gpu_seed(gpu_index, iteration);
+                        let timer = Instant::now();
+                        unsafe {
+                            vanity_keypair_round(
+                                gpu_index as i32,
+                                seed.as_ptr(),
+                                prefix.as_ptr(),
+                                suffix.as_ptr(),
+                                prefix.len() as u64,
+                                suffix.len() as u64,
+                                out.as_mut_ptr(),
+                                args.case_insensitive,
+                            );
+                        }
+                        let time_sec = timer.elapsed().as_secs_f64();
+
+                        let found_seed: [u8; 32] = out[..32].try_into().unwrap();
+                        let signing_key = SigningKey::from_bytes(&found_seed);
+                        let pubkey_bytes = signing_key.verifying_key().to_bytes();
+                        let pubkey_str = fd_bs58::encode_32(pubkey_bytes);
+                        let pubkey_check = maybe_bs58_aware_lowercase(&pubkey_str, args.case_insensitive);
+                        let count = u64::from_le_bytes(array::from_fn(|i| out[32 + i]));
+
+                        logfather::info!(
+                            "{} found in {:.3} seconds on gpu {gpu_index:>3}; {:>13} iters; {:>12} iters/sec",
+                            &pubkey_str,
+                            time_sec,
+                            count.to_formatted_string(&Locale::en),
+                            ((count as f64 / time_sec) as u64).to_formatted_string(&Locale::en)
+                        );
+
+                        if pubkey_check.starts_with(prefix) && pubkey_check.ends_with(suffix) {
+                            print_keypair_result(&found_seed, &pubkey_bytes, &pubkey_str);
+                            FOUND.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                })
+                .unwrap()
+        })
+        .collect();
+
+    (0..args.num_cpus).into_par_iter().for_each(|i| {
+        let timer = Instant::now();
+        let mut count = 0_u64;
+
+        loop {
+            if done(target_count) {
+                return;
+            }
+
+            let seed: [u8; 32] = rand::random();
+            let signing_key = SigningKey::from_bytes(&seed);
+            let pubkey_bytes = signing_key.verifying_key().to_bytes();
+            let pubkey_str = fd_bs58::encode_32(pubkey_bytes);
+            let pubkey_check = maybe_bs58_aware_lowercase(&pubkey_str, args.case_insensitive);
+
+            count += 1;
+
+            if pubkey_check.starts_with(prefix) && pubkey_check.ends_with(suffix) {
+                let time_secs = timer.elapsed().as_secs_f64();
+                logfather::info!(
+                    "cpu {i} found target: {pubkey_str} in {:.3}s; {} attempts; {} attempts per second",
+                    time_secs,
+                    count.to_formatted_string(&Locale::en),
+                    ((count as f64 / time_secs) as u64).to_formatted_string(&Locale::en)
+                );
+                print_keypair_result(&seed, &pubkey_bytes, &pubkey_str);
+                FOUND.fetch_add(1, Ordering::SeqCst);
+                if done(target_count) {
+                    break;
+                }
+            }
+        }
+    });
+}
+
+fn print_keypair_result(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
+    let seed_hex: String = seed.iter().map(|b| format!("{b:02x}")).collect();
+    logfather::info!("pubkey:   {pubkey_str}");
+    logfather::info!("seed hex: {seed_hex}");
+    let keypair_json: Vec<u8> = seed.iter().chain(pubkey.iter()).copied().collect();
+    logfather::info!(
+        "keypair json (solana-compatible): {:?}",
+        keypair_json
+    );
+}
+
+fn get_validated_bs58(label: &str, value: &Option<String>, case_insensitive: bool) -> &'static str {
+    const BS58_CHARS: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    if let Some(ref s) = value {
+        for c in s.chars() {
+            assert!(BS58_CHARS.contains(c), "your {label} contains invalid bs58: {c}");
+        }
+        let validated = maybe_bs58_aware_lowercase(s, case_insensitive);
+        return validated.leak();
+    }
+    ""
 }
 
 fn get_validated_prefix(args: &GrindArgs) -> &'static str {
@@ -445,6 +620,18 @@ extern "C" {
         target: *const u8,
         suffix: *const u8,
         target_len: u64,
+        suffix_len: u64,
+        out: *mut u8,
+        case_insensitive: bool,
+    );
+
+    #[cfg(feature = "gpu")]
+    pub fn vanity_keypair_round(
+        gpu_id: i32,
+        seed: *const u8,
+        prefix: *const u8,
+        suffix: *const u8,
+        prefix_len: u64,
         suffix_len: u64,
         out: *mut u8,
         case_insensitive: bool,

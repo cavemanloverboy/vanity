@@ -9,8 +9,10 @@ fn build_cuda_libs() {
 
     cc::Build::new()
         .cuda(true)
+        .include("kernels")
         .file("kernels/utils.cu")
         .file("kernels/vanity.cu")
+        .file("kernels/vanity_keypair.cu")
         .file("kernels/base58.cu")
         .file("kernels/sha256.cu")
         .flag("-cudart=static")
