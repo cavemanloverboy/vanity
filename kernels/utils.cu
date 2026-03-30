@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <cuda_runtime.h>
 #include "utils.h"
 
 int num_multi_processors;
@@ -36,5 +38,20 @@ extern "C" void gpu_init(int id)
     block_size = (max_threads_per_mp / gcd(max_threads_per_mp, num_threads));
     num_threads = 256; // / block_size;
     num_blocks = block_size * num_multi_processors;
-    target_cycles = device_prop.clockRate * 1000 * 5; // clockRate is in kHz, mine for 55 seconds
+
+    // Peak clock frequency in kHz (used below to set target_cycles).
+    int clock_rate_khz = 0;
+    cudaError_t rate_err = cudaDeviceGetAttribute(&clock_rate_khz, cudaDevAttrClockRate, id);
+    if (rate_err != cudaSuccess) {
+        fprintf(stderr, "gpu_init(device %d): cudaDevAttrClockRate failed: %s\n", id,
+                cudaGetErrorString(rate_err));
+        exit(EXIT_FAILURE);
+    }
+    if (clock_rate_khz <= 0) {
+        fprintf(stderr, "gpu_init(device %d): cudaDevAttrClockRate returned %d (expected > 0)\n", id,
+                clock_rate_khz);
+        exit(EXIT_FAILURE);
+    }
+    // kHz → Hz: nominal GPU cycles over ~1 second at that clock.
+    target_cycles = (unsigned long long)clock_rate_khz * 1000ULL;
 }

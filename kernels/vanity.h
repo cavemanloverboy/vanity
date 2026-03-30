@@ -4,7 +4,13 @@
 #include <stdint.h>
 #include "utils.h"
 
-extern "C" void vanity_round(int gpus, uint8_t *seed, uint8_t *base, uint8_t *owner, char *target, char *suffix, uint64_t target_len, uint64_t suffix_len, uint8_t *out, bool case_insensitive);
-__global__ void vanity_search(uint8_t *buffer, uint64_t stride);
+extern "C" void* gpu_grind_init(int id, uint8_t *base, uint8_t *owner, uint8_t *target, uint64_t target_len, uint8_t *suffix, uint64_t suffix_len, bool case_insensitive);
+extern "C" void  gpu_grind_launch(void *ctx, uint8_t *seed);
+extern "C" int   gpu_grind_query(void *ctx);
+extern "C" void  gpu_grind_read(void *ctx, uint8_t *out);
+extern "C" void  gpu_grind_destroy(void *ctx);
+
+__global__ void vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles);
 __device__ bool matches_target(unsigned char *a, unsigned char *target, uint64_t n, unsigned char *suffix, uint64_t suffix_len, ulong encoded_len);
+
 #endif

@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <cuda_runtime.h>
 #include "vanity_keypair.h"
 #include "base58.h"
 #include "sha256.h"
@@ -11,115 +13,132 @@ __device__ static int kp_done = 0;
 __device__ static unsigned long long kp_count = 0;
 __device__ static bool kp_case_insensitive = false;
 
-static int kp_num_blocks;
-static int kp_num_threads;
-
-static void kp_gpu_init(int id) {
-    cudaDeviceProp prop;
-    cudaGetDeviceProperties(&prop, id);
-
-    kp_num_threads = 128;
-    int blocks_per_sm = prop.maxThreadsPerMultiProcessor / kp_num_threads;
-    kp_num_blocks = blocks_per_sm * prop.multiProcessorCount;
-}
-
 #define KP_MAX_THREADS 128
 
 static __global__ void __launch_bounds__(KP_MAX_THREADS)
-vanity_keypair_search(uint8_t *buffer, uint64_t stride);
+vanity_keypair_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles);
 static __device__ bool kp_matches_target(
     unsigned char *a,
     unsigned char *prefix, uint64_t prefix_len,
     unsigned char *suffix, uint64_t suffix_len,
     ulong encoded_len);
 
-extern "C" void vanity_keypair_round(
+// ─── persistent context ─────────────────────────────────────────────────────
+
+typedef struct {
+    int device_id;
+    cudaStream_t stream;
+    uint8_t *d_buffer;
+    int num_blocks;
+    int num_threads;
+    unsigned long long target_cycles;
+    uint64_t out_offset;
+} GpuKeypairCtx;
+
+extern "C" void* gpu_keypair_init(
     int id,
-    uint8_t *seed,
-    char *prefix,
-    char *suffix,
-    uint64_t prefix_len,
-    uint64_t suffix_len,
-    uint8_t *out,
+    uint8_t *prefix, uint64_t prefix_len,
+    uint8_t *suffix, uint64_t suffix_len,
     bool case_insensitive)
 {
-    int deviceCount;
-    cudaGetDeviceCount(&deviceCount);
-    if (id >= deviceCount) {
-        printf("Invalid GPU index: %d\n", id);
-        return;
-    }
-
     cudaSetDevice(id);
-    kp_gpu_init(id);
 
-    uint8_t *d_buffer;
-    uint64_t buf_size =
-        32              // seed
-        + 8             // prefix_len
-        + prefix_len    // prefix
-        + 8             // suffix_len
-        + suffix_len    // suffix
-        + 32            // out seed
-        ;
-
-    cudaError_t err = cudaMalloc((void **)&d_buffer, buf_size);
+    cudaDeviceProp prop;
+    cudaError_t err = cudaGetDeviceProperties(&prop, id);
     if (err != cudaSuccess) {
-        printf("CUDA malloc error: %s\n", cudaGetErrorString(err));
-        return;
+        fprintf(stderr, "gpu_keypair_init(%d): cudaGetDeviceProperties: %s\n", id, cudaGetErrorString(err));
+        exit(EXIT_FAILURE);
     }
 
-    uint64_t off = 0;
+    int nthreads = KP_MAX_THREADS;
+    int blocks_per_sm = prop.maxThreadsPerMultiProcessor / nthreads;
+    int nblocks = blocks_per_sm * prop.multiProcessorCount;
 
-    err = cudaMemcpy(d_buffer + off, seed, 32, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) { printf("CUDA memcpy error (seed): %s\n", cudaGetErrorString(err)); cudaFree(d_buffer); return; }
-    off += 32;
+    int clock_khz = 0;
+    if (cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, id) != cudaSuccess || clock_khz <= 0) {
+        fprintf(stderr, "gpu_keypair_init(%d): clock rate query failed\n", id);
+        exit(EXIT_FAILURE);
+    }
 
-    err = cudaMemcpy(d_buffer + off, &prefix_len, 8, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) { printf("CUDA memcpy error (prefix_len): %s\n", cudaGetErrorString(err)); cudaFree(d_buffer); return; }
-    off += 8;
+    GpuKeypairCtx *ctx = (GpuKeypairCtx *)malloc(sizeof(GpuKeypairCtx));
+    ctx->device_id   = id;
+    ctx->num_blocks  = nblocks;
+    ctx->num_threads = nthreads;
+    ctx->target_cycles = (unsigned long long)clock_khz * 1000ULL * 5ULL;
 
-    err = cudaMemcpy(d_buffer + off, prefix, prefix_len, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) { printf("CUDA memcpy error (prefix): %s\n", cudaGetErrorString(err)); cudaFree(d_buffer); return; }
+    cudaStreamCreate(&ctx->stream);
+
+    // Buffer: [seed:32] [prefix_len:8] [prefix:N] [suffix_len:8] [suffix:M] [out:32]
+    uint64_t buf_size = 32 + 8 + prefix_len + 8 + suffix_len + 32;
+    ctx->out_offset = 32 + 8 + prefix_len + 8 + suffix_len;
+
+    err = cudaMalloc((void**)&ctx->d_buffer, buf_size);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "gpu_keypair_init(%d): cudaMalloc: %s\n", id, cudaGetErrorString(err));
+        exit(EXIT_FAILURE);
+    }
+
+    // Upload invariant data (everything after the 32-byte seed slot)
+    uint64_t off = 32;
+    cudaMemcpy(ctx->d_buffer + off, &prefix_len, 8, cudaMemcpyHostToDevice); off += 8;
+    if (prefix_len > 0) cudaMemcpy(ctx->d_buffer + off, prefix, prefix_len, cudaMemcpyHostToDevice);
     off += prefix_len;
+    cudaMemcpy(ctx->d_buffer + off, &suffix_len, 8, cudaMemcpyHostToDevice); off += 8;
+    if (suffix_len > 0) cudaMemcpy(ctx->d_buffer + off, suffix, suffix_len, cudaMemcpyHostToDevice);
 
-    err = cudaMemcpy(d_buffer + off, &suffix_len, 8, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) { printf("CUDA memcpy error (suffix_len): %s\n", cudaGetErrorString(err)); cudaFree(d_buffer); return; }
-    off += 8;
+    cudaMemcpyToSymbol(kp_case_insensitive, &case_insensitive, 1, 0, cudaMemcpyHostToDevice);
 
-    err = cudaMemcpy(d_buffer + off, suffix, suffix_len, cudaMemcpyHostToDevice);
-    if (err != cudaSuccess) { printf("CUDA memcpy error (suffix): %s\n", cudaGetErrorString(err)); cudaFree(d_buffer); return; }
-    off += suffix_len;
+    return (void *)ctx;
+}
 
-    err = cudaMemcpyToSymbol(kp_case_insensitive, &case_insensitive, 1, 0, cudaMemcpyHostToDevice);
+extern "C" void gpu_keypair_launch(void *opaque, uint8_t *seed)
+{
+    GpuKeypairCtx *ctx = (GpuKeypairCtx *)opaque;
+    cudaSetDevice(ctx->device_id);
+
+    cudaMemcpy(ctx->d_buffer, seed, 32, cudaMemcpyHostToDevice);
 
     int zero = 0;
     unsigned long long zero_ull = 0;
     cudaMemcpyToSymbol(kp_done, &zero, sizeof(int));
     cudaMemcpyToSymbol(kp_count, &zero_ull, sizeof(unsigned long long));
 
-    vanity_keypair_search<<<kp_num_blocks, kp_num_threads>>>(d_buffer, kp_num_blocks * kp_num_threads);
-    cudaDeviceSynchronize();
-
-    err = cudaGetLastError();
-    if (err != cudaSuccess) {
-        printf("CUDA launch error: %s\n", cudaGetErrorString(err));
-        cudaFree(d_buffer);
-        return;
-    }
-
-    // out layout: 32 bytes winning seed + 8 bytes count
-    err = cudaMemcpy(out, d_buffer + off, 32, cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) { printf("CUDA memcpy error (out seed): %s\n", cudaGetErrorString(err)); cudaFree(d_buffer); return; }
-
-    err = cudaMemcpyFromSymbol(out + 32, kp_count, 8, 0, cudaMemcpyDeviceToHost);
-    if (err != cudaSuccess) { printf("CUDA memcpy error (count): %s\n", cudaGetErrorString(err)); cudaFree(d_buffer); return; }
-
-    cudaFree(d_buffer);
+    vanity_keypair_search<<<ctx->num_blocks, ctx->num_threads, 0, ctx->stream>>>(
+        ctx->d_buffer,
+        (uint64_t)ctx->num_blocks * ctx->num_threads,
+        ctx->target_cycles);
 }
 
+extern "C" int gpu_keypair_query(void *opaque)
+{
+    GpuKeypairCtx *ctx = (GpuKeypairCtx *)opaque;
+    cudaSetDevice(ctx->device_id);
+    return cudaStreamQuery(ctx->stream) == cudaSuccess ? 1 : 0;
+}
+
+// out layout written by caller: [seed:32] [count:8]
+extern "C" void gpu_keypair_read(void *opaque, uint8_t *out)
+{
+    GpuKeypairCtx *ctx = (GpuKeypairCtx *)opaque;
+    cudaSetDevice(ctx->device_id);
+    cudaMemcpy(out, ctx->d_buffer + ctx->out_offset, 32, cudaMemcpyDeviceToHost);
+    cudaMemcpyFromSymbol(out + 32, kp_count, 8, 0, cudaMemcpyDeviceToHost);
+}
+
+extern "C" void gpu_keypair_destroy(void *opaque)
+{
+    GpuKeypairCtx *ctx = (GpuKeypairCtx *)opaque;
+    cudaSetDevice(ctx->device_id);
+    cudaStreamSynchronize(ctx->stream);
+    cudaStreamDestroy(ctx->stream);
+    cudaFree(ctx->d_buffer);
+    free(ctx);
+}
+
+// ─── kernel (unchanged) ─────────────────────────────────────────────────────
+
 static __global__ void __launch_bounds__(KP_MAX_THREADS)
-vanity_keypair_search(uint8_t *buffer, uint64_t stride)
+vanity_keypair_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
 {
     uint8_t *host_seed = buffer;
 
@@ -141,12 +160,13 @@ vanity_keypair_search(uint8_t *buffer, uint64_t stride)
     unsigned char encoded[45];
     ge_p3 A;
 
-    // Derive unique per-thread starting seed: SHA-256(host_seed || thread_idx)
     CUDA_SHA256_CTX sha256_ctx;
     cuda_sha256_init(&sha256_ctx);
     cuda_sha256_update(&sha256_ctx, (BYTE *)host_seed, 32);
     cuda_sha256_update(&sha256_ctx, (BYTE *)(&idx), 8);
     cuda_sha256_final(&sha256_ctx, (BYTE *)seed);
+
+    unsigned long long start_clock = clock64();
 
     for (uint64_t iter = 0; iter < uint64_t(1000) * 1000 * 1000 * 1000; iter++)
     {
@@ -155,11 +175,12 @@ vanity_keypair_search(uint8_t *buffer, uint64_t stride)
                 atomicAdd(&kp_count, iter);
                 return;
             }
+            if (clock64() - start_clock >= max_cycles) {
+                atomicAdd(&kp_count, iter);
+                return;
+            }
         }
 
-        // Inlined SHA-512 for exactly 32 bytes:
-        //   sha512_init -> copy 32 bytes into buf -> sha512_final
-        // This avoids all branching in sha512_update since input < 128 bytes.
         sha512_context md;
         md.curlen = 0;
         md.length = 0;
@@ -180,7 +201,6 @@ vanity_keypair_search(uint8_t *buffer, uint64_t stride)
 
         sha512_final(&md, privatek);
 
-        // ed25519 clamping
         privatek[0]  &= 248;
         privatek[31] &= 63;
         privatek[31] |= 64;
@@ -199,7 +219,6 @@ vanity_keypair_search(uint8_t *buffer, uint64_t stride)
             return;
         }
 
-        // Zero-cost RNG: second half of SHA-512 output becomes next seed
         memcpy(seed, privatek + 32, 32);
     }
 }

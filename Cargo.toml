@@ -23,8 +23,9 @@ codegen-units = 1
 clap = { version = "4.5.7", features = ["derive"] }
 ed25519-dalek = "2"
 fd_bs58 = "0.1.0"
-logfather = "0.2.6"
+num-bigint = "0.4"
 num-format = "0.4.4"
+num-traits = "0.2"
 rand = "0.8.5"
 rayon = "1.10.0"
 sha2 = "0.10.8"

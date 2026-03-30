@@ -1,8 +1,9 @@
 use clap::Parser;
 use ed25519_dalek::SigningKey;
-use logfather::{Level, Logger};
+use num_bigint::BigUint;
 use num_format::{Locale, ToFormattedString};
-use rand::{distributions::Alphanumeric, Rng};
+use num_traits::{One, ToPrimitive, Zero};
+use rand;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use sha2::{Digest, Sha256};
 use solana_pubkey::Pubkey;
@@ -23,9 +24,14 @@ use {
 
 use std::{
     array,
+    io::Write,
     str::FromStr,
-    sync::atomic::{AtomicU32, Ordering},
-    time::Instant,
+    sync::{
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        Arc,
+    },
+    thread,
+    time::{Duration, Instant},
 };
 
 #[derive(Debug, Parser)]
@@ -58,10 +64,6 @@ pub struct GrindArgs {
     #[clap(long, default_value_t = false)]
     pub case_insensitive: bool,
 
-    /// Optional log file
-    #[clap(long)]
-    pub logfile: Option<String>,
-
     /// Number of gpus to use for mining
     #[clap(long, default_value_t = 1)]
     #[cfg(feature = "gpu")]
@@ -89,10 +91,6 @@ pub struct GrindKeypairArgs {
     /// Whether user cares about the case of the pubkey
     #[clap(long, default_value_t = false)]
     pub case_insensitive: bool,
-
-    /// Optional log file
-    #[clap(long)]
-    pub logfile: Option<String>,
 
     /// Number of gpus to use for mining
     #[clap(long, default_value_t = 1)]
@@ -157,47 +155,185 @@ pub struct DeployArgs {
     /// Compute unit price
     #[clap(long)]
     pub compute_unit_price: Option<u64>,
-
-    /// Optional log file
-    #[clap(long)]
-    pub logfile: Option<String>,
 }
 
+// ─── globals ────────────────────────────────────────────────────────────────
+
 static FOUND: AtomicU32 = AtomicU32::new(0);
+static TOTAL_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 
 fn done(target: u32) -> bool {
     FOUND.load(Ordering::SeqCst) >= target
 }
 
+// ─── bs58 probability (from cavemanloverboy/bs58p) ──────────────────────────
+
+const BS58_ALPHABET: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+fn bs58_pure_prefix_suffix_prob(prefix: &str, suffix: &str, n_bytes: usize) -> f64 {
+    if prefix.is_empty() && suffix.is_empty() {
+        return 1.0;
+    }
+    let b58 = BigUint::from(58u32);
+    let prefix_len = prefix.len();
+    let suffix_len = suffix.len();
+
+    let mut p_val = BigUint::zero();
+    for (i, c) in prefix.chars().enumerate() {
+        let idx = BS58_ALPHABET.find(c).unwrap();
+        p_val += BigUint::from(idx) * b58.pow((prefix_len - 1 - i) as u32);
+    }
+    let mut s_val = BigUint::zero();
+    for (i, c) in suffix.chars().enumerate() {
+        let idx = BS58_ALPHABET.find(c).unwrap();
+        s_val += BigUint::from(idx) * b58.pow((suffix_len - 1 - i) as u32);
+    }
+
+    let m_big = BigUint::one() << (8 * n_bytes);
+    let ln2 = std::f64::consts::LN_2;
+    let ln58 = 58f64.ln();
+    let bits = (8 * n_bytes) as f64;
+    let l_max = (bits * ln2 / ln58).ceil() as usize;
+
+    let mut total = BigUint::zero();
+    let modulus = b58.pow(suffix_len as u32);
+    let start_l = std::cmp::max(std::cmp::max(prefix_len, suffix_len), 1);
+
+    for l in start_l..=l_max {
+        let pow_lk = b58.pow((l - prefix_len) as u32);
+        let low1 = &p_val * &pow_lk;
+        let low2 = b58.pow((l - 1) as u32);
+        let low_pref = if low1 > low2 { low1 } else { low2 };
+
+        let high1 = (&p_val + BigUint::one()) * &pow_lk;
+        let high2 = b58.pow(l as u32);
+        let mut high_pref = if high1 < high2 { high1 } else { high2 };
+        if high_pref > m_big {
+            high_pref = m_big.clone();
+        }
+        if high_pref <= low_pref {
+            continue;
+        }
+        let r0 = &low_pref % &modulus;
+        let delta = (&s_val + &modulus - &r0) % &modulus;
+        let first = &low_pref + delta;
+        if first >= high_pref {
+            continue;
+        }
+        let cnt = BigUint::one() + (&high_pref - BigUint::one() - &first) / &modulus;
+        total += cnt;
+    }
+
+    total.to_f64().unwrap() / m_big.to_f64().unwrap()
+}
+
+fn bs58_probability(prefix: &str, suffix: &str, case_insensitive: bool) -> f64 {
+    let zeros = prefix.chars().take_while(|&c| c == '1').count();
+    let pre_nz = &prefix[zeros..];
+    let p_zero = if pre_nz.is_empty() {
+        (1.0_f64 / 256.0).powi(zeros as i32)
+    } else {
+        (1.0_f64 / 256.0).powi(zeros as i32) * (255.0 / 256.0)
+    };
+    let rem = 32_usize.saturating_sub(zeros);
+    let pure = bs58_pure_prefix_suffix_prob(pre_nz, suffix, rem);
+    let prob = p_zero * pure;
+
+    if case_insensitive {
+        let ci_factor: f64 = prefix
+            .chars()
+            .chain(suffix.chars())
+            .filter(|c| c.is_ascii_alphabetic() && *c != 'L')
+            .fold(1.0, |acc, _| acc * 2.0);
+        prob * ci_factor
+    } else {
+        prob
+    }
+}
+
+fn expected_attempts(prefix: &str, suffix: &str, case_insensitive: bool) -> f64 {
+    let p = bs58_probability(prefix, suffix, case_insensitive);
+    if p <= 0.0 {
+        f64::INFINITY
+    } else {
+        1.0 / p
+    }
+}
+
+// ─── formatting ─────────────────────────────────────────────────────────────
+
+fn format_duration(secs: f64) -> String {
+    if secs < 0.0 {
+        return "any moment".into();
+    }
+    if secs < 60.0 {
+        return format!("{:.0}s", secs);
+    }
+    let s = secs as u64;
+    if s < 3600 {
+        return format!("{}m {}s", s / 60, s % 60);
+    }
+    if s < 86400 {
+        return format!("{}h {}m", s / 3600, (s % 3600) / 60);
+    }
+    format!("{}d {}h", s / 86400, (s % 86400) / 3600)
+}
+
+fn print_status(total: u64, rate: f64, elapsed: f64, expected: f64) {
+    let e_time = if rate > 0.0 && expected.is_finite() {
+        format!(" | E[grind_time] = {}", format_duration(expected / rate))
+    } else {
+        String::new()
+    };
+    eprint!(
+        "\r\x1b[K{} attempts | {} attempts/sec | elapsed: {}{}",
+        total.to_formatted_string(&Locale::en),
+        (rate as u64).to_formatted_string(&Locale::en),
+        format_duration(elapsed),
+        e_time,
+    );
+    let _ = std::io::stderr().flush();
+}
+
+fn spawn_hashrate_reporter(
+    shutdown: Arc<AtomicBool>,
+    expected: f64,
+    start: Instant,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        loop {
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_secs(1));
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            let elapsed = start.elapsed().as_secs_f64();
+            let total = TOTAL_ATTEMPTS.load(Ordering::Relaxed);
+            let rate = total as f64 / elapsed.max(1e-9);
+            print_status(total, rate, elapsed, expected);
+        }
+    })
+}
+
+// ─── main ───────────────────────────────────────────────────────────────────
+
 fn main() {
     rayon::ThreadPoolBuilder::new().build_global().unwrap();
 
-    // Parse command line arguments
     let command = Command::parse();
     match command {
-        Command::Grind(args) => {
-            grind(args);
-        }
-
-        Command::GrindKeypair(args) => {
-            grind_keypair(args);
-        }
-
-        Command::Verify(args) => {
-            verify(args);
-        }
-
+        Command::Grind(args) => grind(args),
+        Command::GrindKeypair(args) => grind_keypair(args),
+        Command::Verify(args) => verify(args),
         #[cfg(feature = "deploy")]
-        Command::Deploy(args) => {
-            deploy(args);
-        }
+        Command::Deploy(args) => deploy(args),
     }
 }
 
 fn verify(args: VerifyArgs) {
-    // Unpack create with seed arguments
     let VerifyArgs { base, owner, seed } = args;
-
     let result = Pubkey::create_with_seed(&base, &seed, &owner).unwrap();
     println!("Results:");
     println!("  base  {base}");
@@ -208,7 +344,6 @@ fn verify(args: VerifyArgs) {
 
 #[cfg(feature = "deploy")]
 fn deploy(args: DeployArgs) {
-    // Load base and payer keypair
     let base_keypair = read_keypair_file(&args.base).expect("failed to read base keypair");
     let payer_keypair = args
         .payer
@@ -217,18 +352,14 @@ fn deploy(args: DeployArgs) {
         .unwrap_or(base_keypair.insecure_clone());
     let authority = args.authority.unwrap_or_else(|| payer_keypair.pubkey());
 
-    // Target
-    let target = Pubkey::create_with_seed(&base_keypair.pubkey(), &args.seed, &args.owner).unwrap();
-    // Fetch rent
+    let target =
+        Pubkey::create_with_seed(&base_keypair.pubkey(), &args.seed, &args.owner).unwrap();
     let rpc_client = RpcClient::new(args.rpc);
-    // this is such a dumb way to do this
     let buffer_len = rpc_client.get_account_data(&args.buffer).unwrap().len();
-    // I forgot the header len so let's just add 64 for now lol
     let rent = rpc_client
         .get_minimum_balance_for_rent_exemption(UpgradeableLoaderState::size_of_program())
         .expect("failed to fetch rent");
 
-    // Create account with seed
     let instructions = deploy_with_max_program_len_with_seed(
         &payer_keypair.pubkey(),
         &target,
@@ -239,7 +370,6 @@ fn deploy(args: DeployArgs) {
         &base_keypair.pubkey(),
         &args.seed,
     );
-    // Transaction
     let blockhash = rpc_client.get_latest_blockhash().unwrap();
     let signers = if args.payer.is_none() {
         vec![&base_keypair]
@@ -298,91 +428,163 @@ pub fn deploy_with_max_program_len_with_seed(
     ]
 }
 
+// ─── grind ──────────────────────────────────────────────────────────────────
+
 fn grind(mut args: GrindArgs) {
     maybe_update_num_cpus(&mut args.num_cpus);
-    let prefix = get_validated_prefix(&args);
-    let suffix = get_validated_suffix(&args);
+    let prefix = get_validated_bs58("prefix", &args.prefix, args.case_insensitive);
+    let suffix = get_validated_bs58("suffix", &args.suffix, args.case_insensitive);
 
-    // Initialize logger with optional logfile
-    let mut logger = Logger::new();
-    if let Some(ref logfile) = args.logfile {
-        logger.file(true);
-        logger.path(logfile);
-    }
-
-    // Slightly more compact log format
-    logger.log_format("[{timestamp} {level}] {message}");
-    logger.timestamp_format("%Y-%m-%d %H:%M:%S");
-    logger.level(Level::Info);
-
-    // Print resource usage
-    logfather::info!("using {} threads", args.num_cpus);
+    let expected = expected_attempts(prefix, suffix, args.case_insensitive);
+    let prob = bs58_probability(prefix, suffix, args.case_insensitive);
     #[cfg(feature = "gpu")]
-    logfather::info!("using {} gpus", args.num_gpus);
+    eprintln!("using {} cpus, {} gpus", args.num_cpus, args.num_gpus);
+    #[cfg(not(feature = "gpu"))]
+    eprintln!("using {} cpus", args.num_cpus);
+    let target_label = format_target_label(prefix, suffix);
+    eprintln!(
+        "target: {} | probability: {:.6e} | expected: {} attempts",
+        target_label, prob, (expected as u64).to_formatted_string(&Locale::en)
+    );
 
     let target_count = args.count;
+    let shutdown = Arc::new(AtomicBool::new(false));
 
     #[cfg(feature = "gpu")]
-    let _gpu_threads: Vec<_> = (0..args.num_gpus)
-        .map(move |gpu_index| {
-            std::thread::Builder::new()
-                .name(format!("gpu{gpu_index}"))
+    let gpu_thread = if args.num_gpus > 0 {
+        let num_gpus = args.num_gpus;
+        let base = args.base;
+        let owner = args.owner;
+        let ci = args.case_insensitive;
+        Some(
+            thread::Builder::new()
+                .name("gpu_mgr".into())
                 .spawn(move || {
-                    logfather::trace!("starting gpu {gpu_index}");
+                    let mut contexts = Vec::with_capacity(num_gpus as usize);
+                    for id in 0..num_gpus {
+                        let ctx = unsafe {
+                            gpu_grind_init(
+                                id as i32,
+                                base.as_ref().as_ptr(),
+                                owner.as_ref().as_ptr(),
+                                prefix.as_ptr(),
+                                prefix.len() as u64,
+                                suffix.as_ptr(),
+                                suffix.len() as u64,
+                                ci,
+                            )
+                        };
+                        contexts.push(ctx);
+                    }
 
-                    let mut out = [0; 24];
-                    for iteration in 0_u64.. {
-                        if done(target_count) {
-                            logfather::trace!("gpu thread {gpu_index} exiting");
-                            return;
+                    let mut iterations = vec![0u64; num_gpus as usize];
+                    let mut launch_times = vec![Instant::now(); num_gpus as usize];
+                    let mut in_flight = vec![false; num_gpus as usize];
+
+                    for (i, &ctx) in contexts.iter().enumerate() {
+                        let seed = new_gpu_seed(i as u32, 0);
+                        launch_times[i] = Instant::now();
+                        unsafe { gpu_grind_launch(ctx, seed.as_ptr()); }
+                        in_flight[i] = true;
+                    }
+
+                    loop {
+                        if done(target_count) { break; }
+
+                        let mut any_ready = false;
+                        for (i, &ctx) in contexts.iter().enumerate() {
+                            if !in_flight[i] { continue; }
+                            if unsafe { gpu_grind_query(ctx) } == 0 { continue; }
+                            any_ready = true;
+
+                            let time_sec = launch_times[i].elapsed().as_secs_f64();
+                            let mut out = [0u8; 24];
+                            unsafe { gpu_grind_read(ctx, out.as_mut_ptr()); }
+
+                            let reconstructed: [u8; 32] = Sha256::new()
+                                .chain_update(base)
+                                .chain_update(&out[..16])
+                                .chain_update(owner)
+                                .finalize()
+                                .into();
+                            let out_str = fd_bs58::encode_32(reconstructed);
+                            let out_str_check = maybe_bs58_aware_lowercase(&out_str, ci);
+                            let count = u64::from_le_bytes(array::from_fn(|j| out[16 + j]));
+
+                            TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
+
+                            if out_str_check.starts_with(prefix) && out_str_check.ends_with(suffix)
+                            {
+                                eprintln!(
+                                    "\r\x1b[Kgpu {} match: {} in {:.3}s",
+                                    i, &out_str, time_sec
+                                );
+                                eprintln!(
+                                    "out seed = {out:?} -> {}",
+                                    core::str::from_utf8(&out[..16]).unwrap()
+                                );
+                                FOUND.fetch_add(1, Ordering::SeqCst);
+                            }
+
+                            in_flight[i] = false;
+                            if !done(target_count) {
+                                iterations[i] += 1;
+                                let seed = new_gpu_seed(i as u32, iterations[i]);
+                                launch_times[i] = Instant::now();
+                                unsafe { gpu_grind_launch(ctx, seed.as_ptr()); }
+                                in_flight[i] = true;
+                            }
                         }
 
-                        let seed = new_gpu_seed(gpu_index, iteration);
-                        let timer = Instant::now();
-                        unsafe {
-                            vanity_round(gpu_index, seed.as_ref().as_ptr(), args.base.to_bytes().as_ptr(), args.owner.to_bytes().as_ptr(), prefix.as_ptr(), suffix.as_ptr(), prefix.len() as u64, suffix.len() as u64,out.as_mut_ptr(), args.case_insensitive);
-                        }
-                        let time_sec = timer.elapsed().as_secs_f64();
-
-                        let reconstructed: [u8; 32] = Sha256::new()
-                            .chain_update(&args.base)
-                            .chain_update(&out[..16])
-                            .chain_update(&args.owner)
-                            .finalize()
-                            .into();
-                        let out_str = fd_bs58::encode_32(reconstructed);
-                        let out_str_target_check = maybe_bs58_aware_lowercase(&out_str, args.case_insensitive);
-                        let count = u64::from_le_bytes(array::from_fn(|i| out[16 + i]));
-                        logfather::info!(
-                            "{} found in {:.3} seconds on gpu {gpu_index:>3}; {:>13} iters; {:>12} iters/sec",
-                            &out_str,
-                            time_sec,
-                            count.to_formatted_string(&Locale::en),
-                            ((count as f64 / time_sec) as u64).to_formatted_string(&Locale::en)
-                        );
-
-                        if out_str_target_check.starts_with(prefix) && out_str_target_check.ends_with(suffix) {
-                            logfather::info!("out seed = {out:?} -> {}", core::str::from_utf8(&out[..16]).unwrap());
-                            FOUND.fetch_add(1, Ordering::SeqCst);
+                        if !any_ready {
+                            thread::sleep(Duration::from_millis(10));
                         }
                     }
+
+                    for (i, &ctx) in contexts.iter().enumerate() {
+                        if in_flight[i] {
+                            while unsafe { gpu_grind_query(ctx) } == 0 {
+                                thread::sleep(Duration::from_millis(10));
+                            }
+                            let mut out = [0u8; 24];
+                            unsafe { gpu_grind_read(ctx, out.as_mut_ptr()); }
+                            let count = u64::from_le_bytes(array::from_fn(|j| out[16 + j]));
+                            TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
+                        }
+                    }
+                    for ctx in contexts {
+                        unsafe { gpu_grind_destroy(ctx); }
+                    }
                 })
-                .unwrap()
-        })
-        .collect();
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+
+    let grind_start = Instant::now();
+    let reporter = spawn_hashrate_reporter(
+        Arc::clone(&shutdown), expected, grind_start,
+    );
 
     (0..args.num_cpus).into_par_iter().for_each(|i| {
         let timer = Instant::now();
-        let mut count = 0_u64;
+        let mut local_batch = 0_u64;
 
         let base_sha = Sha256::new().chain_update(args.base);
         loop {
             if done(target_count) {
+                if local_batch > 0 {
+                    TOTAL_ATTEMPTS.fetch_add(local_batch, Ordering::Relaxed);
+                }
                 return;
             }
 
-            let mut seed_iter = rand::thread_rng().sample_iter(&Alphanumeric).take(16);
-            let seed: [u8; 16] = array::from_fn(|_| seed_iter.next().unwrap());
+            let seed: [u8; 16] = rand::random();
+            let seed: [u8; 16] = array::from_fn(|i| {
+                const ALNUM: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+                ALNUM[seed[i] as usize % ALNUM.len()]
+            });
 
             let pubkey_bytes: [u8; 32] = base_sha
                 .clone()
@@ -391,20 +593,29 @@ fn grind(mut args: GrindArgs) {
                 .finalize()
                 .into();
             let pubkey = fd_bs58::encode_32(pubkey_bytes);
-            let out_str_target_check = maybe_bs58_aware_lowercase(&pubkey, args.case_insensitive);
 
-            count += 1;
+            local_batch += 1;
+            if local_batch >= 4096 {
+                TOTAL_ATTEMPTS.fetch_add(4096, Ordering::Relaxed);
+                local_batch -= 4096;
+            }
 
-            if out_str_target_check.starts_with(prefix) && out_str_target_check.ends_with(suffix) {
+            if matches_target(&pubkey, prefix, suffix, args.case_insensitive)
+            {
+                if local_batch > 0 {
+                    TOTAL_ATTEMPTS.fetch_add(local_batch, Ordering::Relaxed);
+                    local_batch = 0;
+                }
                 let time_secs = timer.elapsed().as_secs_f64();
-                logfather::info!(
-                    "cpu {i} found target: {pubkey}; {seed:?} -> {} in {:.3}s; {} attempts; {} attempts per second",
+                let elapsed_global = grind_start.elapsed().as_secs_f64().max(1e-9);
+                let total = TOTAL_ATTEMPTS.load(Ordering::Relaxed);
+                let global_rate = total as f64 / elapsed_global;
+                eprintln!(
+                    "\r\x1b[Kcpu {i} match: {pubkey}; {seed:?} -> {} in {:.3}s; {} attempts/sec",
                     core::str::from_utf8(&seed).unwrap(),
                     time_secs,
-                    count.to_formatted_string(&Locale::en),
-                    ((count as f64 / time_secs) as u64).to_formatted_string(&Locale::en)
+                    (global_rate as u64).to_formatted_string(&Locale::en)
                 );
-
                 FOUND.fetch_add(1, Ordering::SeqCst);
                 if done(target_count) {
                     break;
@@ -412,87 +623,165 @@ fn grind(mut args: GrindArgs) {
             }
         }
     });
+
+    #[cfg(feature = "gpu")]
+    if let Some(t) = gpu_thread {
+        t.join().unwrap();
+    }
+
+    shutdown.store(true, Ordering::SeqCst);
+    reporter.join().unwrap();
+
+    let total = TOTAL_ATTEMPTS.load(Ordering::Relaxed);
+    let elapsed = grind_start.elapsed().as_secs_f64().max(1e-9);
+    let rate = total as f64 / elapsed;
+    eprintln!(
+        "\r\x1b[Kdone: {} attempts in {} at {} attempts/sec",
+        total.to_formatted_string(&Locale::en),
+        format_duration(elapsed),
+        (rate as u64).to_formatted_string(&Locale::en)
+    );
 }
+
+// ─── grind-keypair ──────────────────────────────────────────────────────────
 
 fn grind_keypair(mut args: GrindKeypairArgs) {
     maybe_update_num_cpus(&mut args.num_cpus);
     let prefix = get_validated_bs58("prefix", &args.prefix, args.case_insensitive);
     let suffix = get_validated_bs58("suffix", &args.suffix, args.case_insensitive);
 
-    let mut logger = Logger::new();
-    if let Some(ref logfile) = args.logfile {
-        logger.file(true);
-        logger.path(logfile);
-    }
-    logger.log_format("[{timestamp} {level}] {message}");
-    logger.timestamp_format("%Y-%m-%d %H:%M:%S");
-    logger.level(Level::Info);
+    let expected = expected_attempts(prefix, suffix, args.case_insensitive);
+    let prob = bs58_probability(prefix, suffix, args.case_insensitive);
+    #[cfg(feature = "gpu")]
+    eprintln!("using {} cpus, {} gpus", args.num_cpus, args.num_gpus);
+    #[cfg(not(feature = "gpu"))]
+    eprintln!("using {} cpus", args.num_cpus);
+    let target_label = format_target_label(prefix, suffix);
+    eprintln!(
+        "target: {} | probability: {:.6e} | expected: {} attempts",
+        target_label, prob, (expected as u64).to_formatted_string(&Locale::en)
+    );
 
     let target_count = args.count;
-
-    logfather::info!("grind-keypair: using {} threads", args.num_cpus);
-    #[cfg(feature = "gpu")]
-    logfather::info!("grind-keypair: using {} gpus", args.num_gpus);
+    let shutdown = Arc::new(AtomicBool::new(false));
 
     #[cfg(feature = "gpu")]
-    let _gpu_threads: Vec<_> = (0..args.num_gpus)
-        .map(move |gpu_index| {
-            std::thread::Builder::new()
-                .name(format!("kp_gpu{gpu_index}"))
+    let gpu_thread = if args.num_gpus > 0 {
+        let num_gpus = args.num_gpus;
+        let ci = args.case_insensitive;
+        Some(
+            thread::Builder::new()
+                .name("gpu_mgr".into())
                 .spawn(move || {
-                    let mut out = [0u8; 40];
-                    for iteration in 0_u64.. {
-                        if done(target_count) {
-                            return;
-                        }
-
-                        let seed = new_gpu_seed(gpu_index, iteration);
-                        let timer = Instant::now();
-                        unsafe {
-                            vanity_keypair_round(
-                                gpu_index as i32,
-                                seed.as_ptr(),
+                    let mut contexts = Vec::with_capacity(num_gpus as usize);
+                    for id in 0..num_gpus {
+                        let ctx = unsafe {
+                            gpu_keypair_init(
+                                id as i32,
                                 prefix.as_ptr(),
-                                suffix.as_ptr(),
                                 prefix.len() as u64,
+                                suffix.as_ptr(),
                                 suffix.len() as u64,
-                                out.as_mut_ptr(),
-                                args.case_insensitive,
-                            );
+                                ci,
+                            )
+                        };
+                        contexts.push(ctx);
+                    }
+
+                    let mut iterations = vec![0u64; num_gpus as usize];
+                    let mut launch_times = vec![Instant::now(); num_gpus as usize];
+                    let mut in_flight = vec![false; num_gpus as usize];
+
+                    for (i, &ctx) in contexts.iter().enumerate() {
+                        let seed = new_gpu_seed(i as u32, 0);
+                        launch_times[i] = Instant::now();
+                        unsafe { gpu_keypair_launch(ctx, seed.as_ptr()); }
+                        in_flight[i] = true;
+                    }
+
+                    loop {
+                        if done(target_count) { break; }
+
+                        let mut any_ready = false;
+                        for (i, &ctx) in contexts.iter().enumerate() {
+                            if !in_flight[i] { continue; }
+                            if unsafe { gpu_keypair_query(ctx) } == 0 { continue; }
+                            any_ready = true;
+
+                            let time_sec = launch_times[i].elapsed().as_secs_f64();
+                            let mut out = [0u8; 40];
+                            unsafe { gpu_keypair_read(ctx, out.as_mut_ptr()); }
+
+                            let found_seed: [u8; 32] = out[..32].try_into().unwrap();
+                            let signing_key = SigningKey::from_bytes(&found_seed);
+                            let pubkey_bytes = signing_key.verifying_key().to_bytes();
+                            let pubkey_str = fd_bs58::encode_32(pubkey_bytes);
+                            let pubkey_check = maybe_bs58_aware_lowercase(&pubkey_str, ci);
+                            let count = u64::from_le_bytes(array::from_fn(|j| out[32 + j]));
+
+                            TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
+
+                            if pubkey_check.starts_with(prefix)
+                                && pubkey_check.ends_with(suffix)
+                            {
+                                eprintln!(
+                                    "\r\x1b[Kgpu {} match: {} in {:.3}s",
+                                    i, &pubkey_str, time_sec
+                                );
+                                print_keypair_result(&found_seed, &pubkey_bytes, &pubkey_str);
+                                FOUND.fetch_add(1, Ordering::SeqCst);
+                            }
+
+                            in_flight[i] = false;
+                            if !done(target_count) {
+                                iterations[i] += 1;
+                                let seed = new_gpu_seed(i as u32, iterations[i]);
+                                launch_times[i] = Instant::now();
+                                unsafe { gpu_keypair_launch(ctx, seed.as_ptr()); }
+                                in_flight[i] = true;
+                            }
                         }
-                        let time_sec = timer.elapsed().as_secs_f64();
 
-                        let found_seed: [u8; 32] = out[..32].try_into().unwrap();
-                        let signing_key = SigningKey::from_bytes(&found_seed);
-                        let pubkey_bytes = signing_key.verifying_key().to_bytes();
-                        let pubkey_str = fd_bs58::encode_32(pubkey_bytes);
-                        let pubkey_check = maybe_bs58_aware_lowercase(&pubkey_str, args.case_insensitive);
-                        let count = u64::from_le_bytes(array::from_fn(|i| out[32 + i]));
-
-                        logfather::info!(
-                            "{} found in {:.3} seconds on gpu {gpu_index:>3}; {:>13} iters; {:>12} iters/sec",
-                            &pubkey_str,
-                            time_sec,
-                            count.to_formatted_string(&Locale::en),
-                            ((count as f64 / time_sec) as u64).to_formatted_string(&Locale::en)
-                        );
-
-                        if pubkey_check.starts_with(prefix) && pubkey_check.ends_with(suffix) {
-                            print_keypair_result(&found_seed, &pubkey_bytes, &pubkey_str);
-                            FOUND.fetch_add(1, Ordering::SeqCst);
+                        if !any_ready {
+                            thread::sleep(Duration::from_millis(10));
                         }
                     }
+
+                    for (i, &ctx) in contexts.iter().enumerate() {
+                        if in_flight[i] {
+                            while unsafe { gpu_keypair_query(ctx) } == 0 {
+                                thread::sleep(Duration::from_millis(10));
+                            }
+                            let mut out = [0u8; 40];
+                            unsafe { gpu_keypair_read(ctx, out.as_mut_ptr()); }
+                            let count = u64::from_le_bytes(array::from_fn(|j| out[32 + j]));
+                            TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
+                        }
+                    }
+                    for ctx in contexts {
+                        unsafe { gpu_keypair_destroy(ctx); }
+                    }
                 })
-                .unwrap()
-        })
-        .collect();
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+
+    let grind_start = Instant::now();
+    let reporter = spawn_hashrate_reporter(
+        Arc::clone(&shutdown), expected, grind_start,
+    );
 
     (0..args.num_cpus).into_par_iter().for_each(|i| {
         let timer = Instant::now();
-        let mut count = 0_u64;
+        let mut local_batch = 0_u64;
 
         loop {
             if done(target_count) {
+                if local_batch > 0 {
+                    TOTAL_ATTEMPTS.fetch_add(local_batch, Ordering::Relaxed);
+                }
                 return;
             }
 
@@ -500,17 +789,26 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
             let signing_key = SigningKey::from_bytes(&seed);
             let pubkey_bytes = signing_key.verifying_key().to_bytes();
             let pubkey_str = fd_bs58::encode_32(pubkey_bytes);
-            let pubkey_check = maybe_bs58_aware_lowercase(&pubkey_str, args.case_insensitive);
 
-            count += 1;
+            local_batch += 1;
+            if local_batch >= 4096 {
+                TOTAL_ATTEMPTS.fetch_add(4096, Ordering::Relaxed);
+                local_batch -= 4096;
+            }
 
-            if pubkey_check.starts_with(prefix) && pubkey_check.ends_with(suffix) {
+            if matches_target(&pubkey_str, prefix, suffix, args.case_insensitive) {
+                if local_batch > 0 {
+                    TOTAL_ATTEMPTS.fetch_add(local_batch, Ordering::Relaxed);
+                    local_batch = 0;
+                }
                 let time_secs = timer.elapsed().as_secs_f64();
-                logfather::info!(
-                    "cpu {i} found target: {pubkey_str} in {:.3}s; {} attempts; {} attempts per second",
+                let elapsed_global = grind_start.elapsed().as_secs_f64().max(1e-9);
+                let total = TOTAL_ATTEMPTS.load(Ordering::Relaxed);
+                let global_rate = total as f64 / elapsed_global;
+                eprintln!(
+                    "\r\x1b[Kcpu {i} match: {pubkey_str} in {:.3}s; {} attempts/sec",
                     time_secs,
-                    count.to_formatted_string(&Locale::en),
-                    ((count as f64 / time_secs) as u64).to_formatted_string(&Locale::en)
+                    (global_rate as u64).to_formatted_string(&Locale::en)
                 );
                 print_keypair_result(&seed, &pubkey_bytes, &pubkey_str);
                 FOUND.fetch_add(1, Ordering::SeqCst);
@@ -520,24 +818,57 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
             }
         }
     });
+
+    #[cfg(feature = "gpu")]
+    if let Some(t) = gpu_thread {
+        t.join().unwrap();
+    }
+
+    shutdown.store(true, Ordering::SeqCst);
+    reporter.join().unwrap();
+
+    let total = TOTAL_ATTEMPTS.load(Ordering::Relaxed);
+    let elapsed = grind_start.elapsed().as_secs_f64().max(1e-9);
+    let rate = total as f64 / elapsed;
+    eprintln!(
+        "\r\x1b[Kdone: {} attempts in {} at {} attempts/sec",
+        total.to_formatted_string(&Locale::en),
+        format_duration(elapsed),
+        (rate as u64).to_formatted_string(&Locale::en)
+    );
+}
+
+// ─── helpers ────────────────────────────────────────────────────────────────
+
+fn format_target_label(prefix: &str, suffix: &str) -> String {
+    match (prefix.is_empty(), suffix.is_empty()) {
+        (false, false) => format!("{}...{}", prefix, suffix),
+        (false, true) => prefix.to_string(),
+        (true, false) => format!("...{}", suffix),
+        (true, true) => "*".to_string(),
+    }
 }
 
 fn print_keypair_result(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
     let seed_hex: String = seed.iter().map(|b| format!("{b:02x}")).collect();
-    logfather::info!("pubkey:   {pubkey_str}");
-    logfather::info!("seed hex: {seed_hex}");
+    eprintln!("pubkey:   {pubkey_str}");
+    eprintln!("seed hex: {seed_hex}");
     let keypair_json: Vec<u8> = seed.iter().chain(pubkey.iter()).copied().collect();
-    logfather::info!(
-        "keypair json (solana-compatible): {:?}",
-        keypair_json
-    );
+    eprintln!("keypair json (solana-compatible): {:?}", keypair_json);
 }
 
-fn get_validated_bs58(label: &str, value: &Option<String>, case_insensitive: bool) -> &'static str {
+fn get_validated_bs58(
+    label: &str,
+    value: &Option<String>,
+    case_insensitive: bool,
+) -> &'static str {
     const BS58_CHARS: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     if let Some(ref s) = value {
         for c in s.chars() {
-            assert!(BS58_CHARS.contains(c), "your {label} contains invalid bs58: {c}");
+            assert!(
+                BS58_CHARS.contains(c),
+                "your {label} contains invalid bs58: {c}"
+            );
         }
         let validated = maybe_bs58_aware_lowercase(s, case_insensitive);
         return validated.leak();
@@ -545,97 +876,70 @@ fn get_validated_bs58(label: &str, value: &Option<String>, case_insensitive: boo
     ""
 }
 
-fn get_validated_prefix(args: &GrindArgs) -> &'static str {
-    // Static string of BS58 characters
-    const BS58_CHARS: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-
-    // Validate target (i.e. does it include 0, O, I, l)
-    //
-    // maybe TODO: technically we could accept I or o if case-insensitivity but I suspect
-    // most users will provide lowercase targets for case-insensitive searches
-
-    if let Some(ref prefix) = args.prefix {
-        for c in prefix.chars() {
-            assert!(
-                BS58_CHARS.contains(c),
-                "your prefix contains invalid bs58: {}",
-                c
-            );
-        }
-        let prefix = maybe_bs58_aware_lowercase(&prefix, args.case_insensitive);
-        return prefix.leak();
-    }
-    ""
-}
-
-fn get_validated_suffix(args: &GrindArgs) -> &'static str {
-    // Static string of BS58 characters
-    const BS58_CHARS: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-
-    // Validate target (i.e. does it include 0, O, I, l)
-    //
-    // maybe TODO: technically we could accept I or o if case-insensitivity but I suspect
-    // most users will provide lowercase targets for case-insensitive searches
-
-    if let Some(ref suffix) = args.suffix {
-        for c in suffix.chars() {
-            assert!(
-                BS58_CHARS.contains(c),
-                "your suffix contains invalid bs58: {}",
-                c
-            );
-        }
-        let suffix = maybe_bs58_aware_lowercase(&suffix, args.case_insensitive);
-        return suffix.leak();
-    }
-    ""
-}
-
 fn maybe_bs58_aware_lowercase(target: &str, case_insensitive: bool) -> String {
-    // L is only char that shouldn't be converted to lowercase in case-insensitivity case
-    const LOWERCASE_EXCEPTIONS: &str = "L";
-
     if case_insensitive {
         target
             .chars()
-            .map(|c| {
-                if LOWERCASE_EXCEPTIONS.contains(c) {
-                    c
-                } else {
-                    c.to_ascii_lowercase()
-                }
-            })
+            .map(|c| if c == 'L' { c } else { c.to_ascii_lowercase() })
             .collect::<String>()
     } else {
         target.to_string()
     }
 }
 
+fn matches_target(pubkey: &str, prefix: &str, suffix: &str, case_insensitive: bool) -> bool {
+    if case_insensitive {
+        (prefix.is_empty() || bs58_ci_matches(pubkey, prefix, true))
+            && (suffix.is_empty() || bs58_ci_matches(pubkey, suffix, false))
+    } else {
+        pubkey.starts_with(prefix) && pubkey.ends_with(suffix)
+    }
+}
+
+fn bs58_ci_matches(haystack: &str, pattern: &str, prefix: bool) -> bool {
+    let h = if prefix {
+        &haystack[..pattern.len().min(haystack.len())]
+    } else {
+        let start = haystack.len().saturating_sub(pattern.len());
+        &haystack[start..]
+    };
+    if h.len() != pattern.len() {
+        return false;
+    }
+    h.bytes()
+        .zip(pattern.bytes())
+        .all(|(a, b)| if b == b'L' { a == b'L' } else { a.to_ascii_lowercase() == b })
+}
+
+#[cfg(feature = "gpu")]
 extern "C" {
-    pub fn vanity_round(
-        gpus: u32,
-        seed: *const u8,
+    pub fn gpu_grind_init(
+        id: i32,
         base: *const u8,
         owner: *const u8,
         target: *const u8,
-        suffix: *const u8,
         target_len: u64,
-        suffix_len: u64,
-        out: *mut u8,
-        case_insensitive: bool,
-    );
-
-    #[cfg(feature = "gpu")]
-    pub fn vanity_keypair_round(
-        gpu_id: i32,
-        seed: *const u8,
-        prefix: *const u8,
         suffix: *const u8,
-        prefix_len: u64,
         suffix_len: u64,
-        out: *mut u8,
         case_insensitive: bool,
-    );
+    ) -> *mut std::ffi::c_void;
+    pub fn gpu_grind_launch(ctx: *mut std::ffi::c_void, seed: *const u8);
+    pub fn gpu_grind_query(ctx: *mut std::ffi::c_void) -> i32;
+    pub fn gpu_grind_read(ctx: *mut std::ffi::c_void, out: *mut u8);
+    pub fn gpu_grind_destroy(ctx: *mut std::ffi::c_void);
+
+    pub fn gpu_keypair_init(
+        id: i32,
+        prefix: *const u8,
+        prefix_len: u64,
+        suffix: *const u8,
+        suffix_len: u64,
+        case_insensitive: bool,
+    ) -> *mut std::ffi::c_void;
+    pub fn gpu_keypair_launch(ctx: *mut std::ffi::c_void, seed: *const u8);
+    pub fn gpu_keypair_query(ctx: *mut std::ffi::c_void) -> i32;
+    pub fn gpu_keypair_read(ctx: *mut std::ffi::c_void, out: *mut u8);
+    pub fn gpu_keypair_destroy(ctx: *mut std::ffi::c_void);
 }
 
 #[cfg(feature = "gpu")]
