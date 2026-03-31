@@ -11,7 +11,7 @@ description = "A *bLaZinGlY fAsT* tool for grinding vanity addresses on Solana"
 
 [features]
 gpu = ["cc"]
-deploy = ["solana-rpc-client"]
+deploy = ["solana-rpc-client", "solana-sdk"]
 default = []
 
 [profile.release]
