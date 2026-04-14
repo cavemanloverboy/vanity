@@ -2,6 +2,11 @@
 
 A *bLaZinGlY fAsT* tool for grinding vanity addresses on Solana.
 
+## WSL users
+
+If you are running on Windows 10/11 with WSL2 and NVIDIA GPU, see [`WSL_README.md`](./WSL_README.md) for a tested setup/build/run flow.
+The GPU build uses `build.rs` as Cargo entrypoint and auto-selects native vs WSL builder modules; set `VANITY_CUDA_ARCH` for your GPU (for example `86` for many RTX 30xx, `89` for many RTX 40xx).
+
 ## 1) What
 
 Typically, solana developers wishing to obtain a vanity address for their program or token grind out ed25519 keypairs and sign off on a `SystemInstruction::CreateAccount` instruction. However, by using `SystemInstruction::CreateAccountWithSeed`, developers can bypass ed25519 and get extreme speedups on address searches. Although not as generic, this method covers many use cases.
