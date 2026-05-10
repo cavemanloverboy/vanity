@@ -29,6 +29,64 @@ __constant__ WORD d_sha_W1[64];
    Slots [8..11] (= seed16) are built per-iter and overwritten. */
 __constant__ WORD d_sha_W0_fixed[16];
 
+/* SHA-256 working state (a..h) after rounds 0..7 of block-0, given
+   that those rounds depend only on H0 (constants) and W[0..7] (= the
+   `base` pubkey, fixed per kernel). Precomputed in gpu_grind_init. */
+__constant__ WORD d_sha_state_r7[8];
+
+/* Block-0 SHA-256 transform that skips rounds 0..7 by loading the
+   precomputed working state from constant memory and starting at
+   round 8. The full 48-step W expansion still runs because rounds
+   8..15 use W[8..15] (W[8..11] are variable) and rounds 16+ depend
+   on W[0..7] via the message schedule. */
+static __device__ __forceinline__ void vanity_sha256_block0_skip8(WORD state_out[8], WORD W[64])
+{
+    /* Working state at entry to round 8. */
+    WORD a = d_sha_state_r7[0], b = d_sha_state_r7[1], c = d_sha_state_r7[2], d = d_sha_state_r7[3];
+    WORD e = d_sha_state_r7[4], f = d_sha_state_r7[5], g = d_sha_state_r7[6], h = d_sha_state_r7[7];
+
+    VANITY_SHA_EXPAND48(W);
+
+    VANITY_SHA_R(0xD807AA98U, W[ 8]); VANITY_SHA_R(0x12835B01U, W[ 9]);
+    VANITY_SHA_R(0x243185BEU, W[10]); VANITY_SHA_R(0x550C7DC3U, W[11]);
+    VANITY_SHA_R(0x72BE5D74U, W[12]); VANITY_SHA_R(0x80DEB1FEU, W[13]);
+    VANITY_SHA_R(0x9BDC06A7U, W[14]); VANITY_SHA_R(0xC19BF174U, W[15]);
+    VANITY_SHA_R(0xE49B69C1U, W[16]); VANITY_SHA_R(0xEFBE4786U, W[17]);
+    VANITY_SHA_R(0x0FC19DC6U, W[18]); VANITY_SHA_R(0x240CA1CCU, W[19]);
+    VANITY_SHA_R(0x2DE92C6FU, W[20]); VANITY_SHA_R(0x4A7484AAU, W[21]);
+    VANITY_SHA_R(0x5CB0A9DCU, W[22]); VANITY_SHA_R(0x76F988DAU, W[23]);
+    VANITY_SHA_R(0x983E5152U, W[24]); VANITY_SHA_R(0xA831C66DU, W[25]);
+    VANITY_SHA_R(0xB00327C8U, W[26]); VANITY_SHA_R(0xBF597FC7U, W[27]);
+    VANITY_SHA_R(0xC6E00BF3U, W[28]); VANITY_SHA_R(0xD5A79147U, W[29]);
+    VANITY_SHA_R(0x06CA6351U, W[30]); VANITY_SHA_R(0x14292967U, W[31]);
+    VANITY_SHA_R(0x27B70A85U, W[32]); VANITY_SHA_R(0x2E1B2138U, W[33]);
+    VANITY_SHA_R(0x4D2C6DFCU, W[34]); VANITY_SHA_R(0x53380D13U, W[35]);
+    VANITY_SHA_R(0x650A7354U, W[36]); VANITY_SHA_R(0x766A0ABBU, W[37]);
+    VANITY_SHA_R(0x81C2C92EU, W[38]); VANITY_SHA_R(0x92722C85U, W[39]);
+    VANITY_SHA_R(0xA2BFE8A1U, W[40]); VANITY_SHA_R(0xA81A664BU, W[41]);
+    VANITY_SHA_R(0xC24B8B70U, W[42]); VANITY_SHA_R(0xC76C51A3U, W[43]);
+    VANITY_SHA_R(0xD192E819U, W[44]); VANITY_SHA_R(0xD6990624U, W[45]);
+    VANITY_SHA_R(0xF40E3585U, W[46]); VANITY_SHA_R(0x106AA070U, W[47]);
+    VANITY_SHA_R(0x19A4C116U, W[48]); VANITY_SHA_R(0x1E376C08U, W[49]);
+    VANITY_SHA_R(0x2748774CU, W[50]); VANITY_SHA_R(0x34B0BCB5U, W[51]);
+    VANITY_SHA_R(0x391C0CB3U, W[52]); VANITY_SHA_R(0x4ED8AA4AU, W[53]);
+    VANITY_SHA_R(0x5B9CCA4FU, W[54]); VANITY_SHA_R(0x682E6FF3U, W[55]);
+    VANITY_SHA_R(0x748F82EEU, W[56]); VANITY_SHA_R(0x78A5636FU, W[57]);
+    VANITY_SHA_R(0x84C87814U, W[58]); VANITY_SHA_R(0x8CC70208U, W[59]);
+    VANITY_SHA_R(0x90BEFFFAU, W[60]); VANITY_SHA_R(0xA4506CEBU, W[61]);
+    VANITY_SHA_R(0xBEF9A3F7U, W[62]); VANITY_SHA_R(0xC67178F2U, W[63]);
+
+    /* Final state = H0 (literal) + working state after round 63. */
+    state_out[0] = 0x6a09e667U + a;
+    state_out[1] = 0xbb67ae85U + b;
+    state_out[2] = 0x3c6ef372U + c;
+    state_out[3] = 0xa54ff53aU + d;
+    state_out[4] = 0x510e527fU + e;
+    state_out[5] = 0x9b05688cU + f;
+    state_out[6] = 0x1f83d9abU + g;
+    state_out[7] = 0x5be0cd19U + h;
+}
+
 /* SHA-256 of base[32] || seed16[16] || owner[32] = 80 bytes, in pure
    word form: caller passes 4 words for seed16 (already big-endian
    packed, MSB-first), receives 8 words of digest in `state_out`.
@@ -48,16 +106,7 @@ static __device__ __forceinline__ void vanity_pubkey_sha256_words(const WORD see
     W0[10] = seed_words[2];
     W0[11] = seed_words[3];
 
-    state_out[0] = 0x6a09e667U;
-    state_out[1] = 0xbb67ae85U;
-    state_out[2] = 0x3c6ef372U;
-    state_out[3] = 0xa54ff53aU;
-    state_out[4] = 0x510e527fU;
-    state_out[5] = 0x9b05688cU;
-    state_out[6] = 0x1f83d9abU;
-    state_out[7] = 0x5be0cd19U;
-
-    cuda_sha256_transform_from_w16(state_out, W0);
+    vanity_sha256_block0_skip8(state_out, W0);
     cuda_sha256_transform_w(state_out, d_sha_W1);
 }
 
@@ -213,6 +262,29 @@ extern "C" void* gpu_grind_init(
             host_lut[u] = (uint8_t)alnum[u % 62];
         }
         cudaMemcpyToSymbol(glyph_from_hash_byte, host_lut, sizeof(host_lut));
+    }
+
+    /* Precompute SHA-256 working state after rounds 0..7 of block-0.
+       Those rounds depend only on H0 (literal constants) and W[0..7]
+       (= byte-swapped `base`, fixed for the whole grind), so the result
+       is invariant across every iteration. Skipping them in the kernel
+       saves 7 main rounds + 8 H0 register writes per pubkey hash. */
+    {
+        WORD W[8];
+        for (int i = 0; i < 8; ++i) {
+            W[i] = ((WORD)base[4*i    ] << 24) | ((WORD)base[4*i + 1] << 16)
+                 | ((WORD)base[4*i + 2] <<  8) | ((WORD)base[4*i + 3]      );
+        }
+        WORD a = 0x6a09e667U, b = 0xbb67ae85U, c = 0x3c6ef372U, d = 0xa54ff53aU;
+        WORD e = 0x510e527fU, f = 0x9b05688cU, g = 0x1f83d9abU, h = 0x5be0cd19U;
+
+        VANITY_SHA_R(0x428A2F98U, W[0]); VANITY_SHA_R(0x71374491U, W[1]);
+        VANITY_SHA_R(0xB5C0FBCFU, W[2]); VANITY_SHA_R(0xE9B5DBA5U, W[3]);
+        VANITY_SHA_R(0x3956C25BU, W[4]); VANITY_SHA_R(0x59F111F1U, W[5]);
+        VANITY_SHA_R(0x923F82A4U, W[6]); VANITY_SHA_R(0xAB1C5ED5U, W[7]);
+
+        WORD host_state_r7[8] = {a, b, c, d, e, f, g, h};
+        cudaMemcpyToSymbol(d_sha_state_r7, host_state_r7, sizeof(host_state_r7));
     }
 
     return (void *)ctx;
