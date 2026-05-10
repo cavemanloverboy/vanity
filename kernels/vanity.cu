@@ -321,7 +321,7 @@ vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
     unsigned long long start_clock = clock64();
     uint32_t watchdog = 1u;
 
-    for (uint64_t iter = 0; iter < uint64_t(1000) * 1000 * 1000 * 1000; iter++)
+    for (uint64_t iter = 0;; iter++)
     {
         if (--watchdog == 0)
         {
