@@ -22,25 +22,80 @@
 #define SIG1(x) (ROTRIGHT(x, 17) ^ ROTRIGHT(x, 19) ^ ((x) >> 10))
 
 /**************************** VARIABLES *****************************/
-__constant__ WORD k[64] = {
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
 
 /*********************** FUNCTION DEFINITIONS ***********************/
-__device__ __forceinline__ void cuda_sha256_transform(CUDA_SHA256_CTX *ctx, const BYTE data[])
-{
-    WORD a, b, c, d, e, f, g, h, i, j, t1, t2, m[64];
 
-    for (i = 0, j = 0; i < 16; ++i, j += 4)
-        m[i] = (data[j] << 24) | (data[j + 1] << 16) | (data[j + 2] << 8) | (data[j + 3]);
-    for (; i < 64; ++i)
-        m[i] = SIG1(m[i - 2]) + m[i - 7] + SIG0(m[i - 15]) + m[i - 16];
+// Unrolled one-block compressor (explicit W-schedule + 64 rounds).
+__device__ void cuda_sha256_transform(CUDA_SHA256_CTX *ctx, const BYTE data[])
+{
+    WORD a, b, c, d, e, f, g, h, t1, t2;
+    WORD m[64];
+
+    m[0] = (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | (data[3]);
+    m[1] = (data[4] << 24) | (data[5] << 16) | (data[6] << 8) | (data[7]);
+    m[2] = (data[8] << 24) | (data[9] << 16) | (data[10] << 8) | (data[11]);
+    m[3] = (data[12] << 24) | (data[13] << 16) | (data[14] << 8) | (data[15]);
+    m[4] = (data[16] << 24) | (data[17] << 16) | (data[18] << 8) | (data[19]);
+    m[5] = (data[20] << 24) | (data[21] << 16) | (data[22] << 8) | (data[23]);
+    m[6] = (data[24] << 24) | (data[25] << 16) | (data[26] << 8) | (data[27]);
+    m[7] = (data[28] << 24) | (data[29] << 16) | (data[30] << 8) | (data[31]);
+    m[8] = (data[32] << 24) | (data[33] << 16) | (data[34] << 8) | (data[35]);
+    m[9] = (data[36] << 24) | (data[37] << 16) | (data[38] << 8) | (data[39]);
+    m[10] = (data[40] << 24) | (data[41] << 16) | (data[42] << 8) | (data[43]);
+    m[11] = (data[44] << 24) | (data[45] << 16) | (data[46] << 8) | (data[47]);
+    m[12] = (data[48] << 24) | (data[49] << 16) | (data[50] << 8) | (data[51]);
+    m[13] = (data[52] << 24) | (data[53] << 16) | (data[54] << 8) | (data[55]);
+    m[14] = (data[56] << 24) | (data[57] << 16) | (data[58] << 8) | (data[59]);
+    m[15] = (data[60] << 24) | (data[61] << 16) | (data[62] << 8) | (data[63]);
+
+    m[16] = SIG1(m[14]) + m[9] + SIG0(m[1]) + m[0];
+    m[17] = SIG1(m[15]) + m[10] + SIG0(m[2]) + m[1];
+    m[18] = SIG1(m[16]) + m[11] + SIG0(m[3]) + m[2];
+    m[19] = SIG1(m[17]) + m[12] + SIG0(m[4]) + m[3];
+    m[20] = SIG1(m[18]) + m[13] + SIG0(m[5]) + m[4];
+    m[21] = SIG1(m[19]) + m[14] + SIG0(m[6]) + m[5];
+    m[22] = SIG1(m[20]) + m[15] + SIG0(m[7]) + m[6];
+    m[23] = SIG1(m[21]) + m[16] + SIG0(m[8]) + m[7];
+    m[24] = SIG1(m[22]) + m[17] + SIG0(m[9]) + m[8];
+    m[25] = SIG1(m[23]) + m[18] + SIG0(m[10]) + m[9];
+    m[26] = SIG1(m[24]) + m[19] + SIG0(m[11]) + m[10];
+    m[27] = SIG1(m[25]) + m[20] + SIG0(m[12]) + m[11];
+    m[28] = SIG1(m[26]) + m[21] + SIG0(m[13]) + m[12];
+    m[29] = SIG1(m[27]) + m[22] + SIG0(m[14]) + m[13];
+    m[30] = SIG1(m[28]) + m[23] + SIG0(m[15]) + m[14];
+    m[31] = SIG1(m[29]) + m[24] + SIG0(m[16]) + m[15];
+    m[32] = SIG1(m[30]) + m[25] + SIG0(m[17]) + m[16];
+    m[33] = SIG1(m[31]) + m[26] + SIG0(m[18]) + m[17];
+    m[34] = SIG1(m[32]) + m[27] + SIG0(m[19]) + m[18];
+    m[35] = SIG1(m[33]) + m[28] + SIG0(m[20]) + m[19];
+    m[36] = SIG1(m[34]) + m[29] + SIG0(m[21]) + m[20];
+    m[37] = SIG1(m[35]) + m[30] + SIG0(m[22]) + m[21];
+    m[38] = SIG1(m[36]) + m[31] + SIG0(m[23]) + m[22];
+    m[39] = SIG1(m[37]) + m[32] + SIG0(m[24]) + m[23];
+    m[40] = SIG1(m[38]) + m[33] + SIG0(m[25]) + m[24];
+    m[41] = SIG1(m[39]) + m[34] + SIG0(m[26]) + m[25];
+    m[42] = SIG1(m[40]) + m[35] + SIG0(m[27]) + m[26];
+    m[43] = SIG1(m[41]) + m[36] + SIG0(m[28]) + m[27];
+    m[44] = SIG1(m[42]) + m[37] + SIG0(m[29]) + m[28];
+    m[45] = SIG1(m[43]) + m[38] + SIG0(m[30]) + m[29];
+    m[46] = SIG1(m[44]) + m[39] + SIG0(m[31]) + m[30];
+    m[47] = SIG1(m[45]) + m[40] + SIG0(m[32]) + m[31];
+    m[48] = SIG1(m[46]) + m[41] + SIG0(m[33]) + m[32];
+    m[49] = SIG1(m[47]) + m[42] + SIG0(m[34]) + m[33];
+    m[50] = SIG1(m[48]) + m[43] + SIG0(m[35]) + m[34];
+    m[51] = SIG1(m[49]) + m[44] + SIG0(m[36]) + m[35];
+    m[52] = SIG1(m[50]) + m[45] + SIG0(m[37]) + m[36];
+    m[53] = SIG1(m[51]) + m[46] + SIG0(m[38]) + m[37];
+    m[54] = SIG1(m[52]) + m[47] + SIG0(m[39]) + m[38];
+    m[55] = SIG1(m[53]) + m[48] + SIG0(m[40]) + m[39];
+    m[56] = SIG1(m[54]) + m[49] + SIG0(m[41]) + m[40];
+    m[57] = SIG1(m[55]) + m[50] + SIG0(m[42]) + m[41];
+    m[58] = SIG1(m[56]) + m[51] + SIG0(m[43]) + m[42];
+    m[59] = SIG1(m[57]) + m[52] + SIG0(m[44]) + m[43];
+    m[60] = SIG1(m[58]) + m[53] + SIG0(m[45]) + m[44];
+    m[61] = SIG1(m[59]) + m[54] + SIG0(m[46]) + m[45];
+    m[62] = SIG1(m[60]) + m[55] + SIG0(m[47]) + m[46];
+    m[63] = SIG1(m[61]) + m[56] + SIG0(m[48]) + m[47];
 
     a = ctx->state[0];
     b = ctx->state[1];
@@ -51,19 +106,709 @@ __device__ __forceinline__ void cuda_sha256_transform(CUDA_SHA256_CTX *ctx, cons
     g = ctx->state[6];
     h = ctx->state[7];
 
-    for (i = 0; i < 64; ++i)
-    {
-        t1 = h + EP1(e) + CH(e, f, g) + k[i] + m[i];
-        t2 = EP0(a) + MAJ(a, b, c);
-        h = g;
-        g = f;
-        f = e;
-        e = d + t1;
-        d = c;
-        c = b;
-        b = a;
-        a = t1 + t2;
-    }
+    t1 = h + EP1(e) + CH(e, f, g) + 0x428A2F98U + m[0];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x71374491U + m[1];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xB5C0FBCFU + m[2];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xE9B5DBA5U + m[3];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x3956C25BU + m[4];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x59F111F1U + m[5];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x923F82A4U + m[6];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xAB1C5ED5U + m[7];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xD807AA98U + m[8];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x12835B01U + m[9];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x243185BEU + m[10];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x550C7DC3U + m[11];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x72BE5D74U + m[12];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x80DEB1FEU + m[13];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x9BDC06A7U + m[14];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xC19BF174U + m[15];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xE49B69C1U + m[16];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xEFBE4786U + m[17];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x0FC19DC6U + m[18];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x240CA1CCU + m[19];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x2DE92C6FU + m[20];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x4A7484AAU + m[21];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x5CB0A9DCU + m[22];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x76F988DAU + m[23];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x983E5152U + m[24];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xA831C66DU + m[25];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xB00327C8U + m[26];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xBF597FC7U + m[27];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xC6E00BF3U + m[28];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xD5A79147U + m[29];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x06CA6351U + m[30];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x14292967U + m[31];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x27B70A85U + m[32];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x2E1B2138U + m[33];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x4D2C6DFCU + m[34];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x53380D13U + m[35];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x650A7354U + m[36];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x766A0ABBU + m[37];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x81C2C92EU + m[38];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x92722C85U + m[39];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xA2BFE8A1U + m[40];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xA81A664BU + m[41];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xC24B8B70U + m[42];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xC76C51A3U + m[43];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xD192E819U + m[44];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xD6990624U + m[45];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xF40E3585U + m[46];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x106AA070U + m[47];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x19A4C116U + m[48];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x1E376C08U + m[49];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x2748774CU + m[50];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x34B0BCB5U + m[51];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x391C0CB3U + m[52];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x4ED8AA4AU + m[53];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x5B9CCA4FU + m[54];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x682E6FF3U + m[55];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x748F82EEU + m[56];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x78A5636FU + m[57];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x84C87814U + m[58];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x8CC70208U + m[59];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0x90BEFFFAU + m[60];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xA4506CEBU + m[61];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xBEF9A3F7U + m[62];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
+
+    t1 = h + EP1(e) + CH(e, f, g) + 0xC67178F2U + m[63];
+    t2 = EP0(a) + MAJ(a, b, c);
+    h = g;
+    g = f;
+    f = e;
+    e = d + t1;
+    d = c;
+    c = b;
+    b = a;
+    a = t1 + t2;
 
     ctx->state[0] += a;
     ctx->state[1] += b;
@@ -140,17 +885,37 @@ __device__ void cuda_sha256_final(CUDA_SHA256_CTX *ctx, BYTE hash[])
     ctx->data[56] = ctx->bitlen >> 56;
     cuda_sha256_transform(ctx, ctx->data);
 
-    // Since this implementation uses little endian byte ordering and SHA uses big endian,
-    // reverse all the bytes when copying the final state to the output hash.
-    for (i = 0; i < 4; ++i)
-    {
-        hash[i] = (ctx->state[0] >> (24 - i * 8)) & 0x000000ff;
-        hash[i + 4] = (ctx->state[1] >> (24 - i * 8)) & 0x000000ff;
-        hash[i + 8] = (ctx->state[2] >> (24 - i * 8)) & 0x000000ff;
-        hash[i + 12] = (ctx->state[3] >> (24 - i * 8)) & 0x000000ff;
-        hash[i + 16] = (ctx->state[4] >> (24 - i * 8)) & 0x000000ff;
-        hash[i + 20] = (ctx->state[5] >> (24 - i * 8)) & 0x000000ff;
-        hash[i + 24] = (ctx->state[6] >> (24 - i * 8)) & 0x000000ff;
-        hash[i + 28] = (ctx->state[7] >> (24 - i * 8)) & 0x000000ff;
-    }
+    /* Big-endian emission of digest words */
+    hash[0] = (ctx->state[0] >> 24) & 0x000000ff;
+    hash[1] = (ctx->state[0] >> 16) & 0x000000ff;
+    hash[2] = (ctx->state[0] >> 8) & 0x000000ff;
+    hash[3] = (ctx->state[0] >> 0) & 0x000000ff;
+    hash[4] = (ctx->state[1] >> 24) & 0x000000ff;
+    hash[5] = (ctx->state[1] >> 16) & 0x000000ff;
+    hash[6] = (ctx->state[1] >> 8) & 0x000000ff;
+    hash[7] = (ctx->state[1] >> 0) & 0x000000ff;
+    hash[8] = (ctx->state[2] >> 24) & 0x000000ff;
+    hash[9] = (ctx->state[2] >> 16) & 0x000000ff;
+    hash[10] = (ctx->state[2] >> 8) & 0x000000ff;
+    hash[11] = (ctx->state[2] >> 0) & 0x000000ff;
+    hash[12] = (ctx->state[3] >> 24) & 0x000000ff;
+    hash[13] = (ctx->state[3] >> 16) & 0x000000ff;
+    hash[14] = (ctx->state[3] >> 8) & 0x000000ff;
+    hash[15] = (ctx->state[3] >> 0) & 0x000000ff;
+    hash[16] = (ctx->state[4] >> 24) & 0x000000ff;
+    hash[17] = (ctx->state[4] >> 16) & 0x000000ff;
+    hash[18] = (ctx->state[4] >> 8) & 0x000000ff;
+    hash[19] = (ctx->state[4] >> 0) & 0x000000ff;
+    hash[20] = (ctx->state[5] >> 24) & 0x000000ff;
+    hash[21] = (ctx->state[5] >> 16) & 0x000000ff;
+    hash[22] = (ctx->state[5] >> 8) & 0x000000ff;
+    hash[23] = (ctx->state[5] >> 0) & 0x000000ff;
+    hash[24] = (ctx->state[6] >> 24) & 0x000000ff;
+    hash[25] = (ctx->state[6] >> 16) & 0x000000ff;
+    hash[26] = (ctx->state[6] >> 8) & 0x000000ff;
+    hash[27] = (ctx->state[6] >> 0) & 0x000000ff;
+    hash[28] = (ctx->state[7] >> 24) & 0x000000ff;
+    hash[29] = (ctx->state[7] >> 16) & 0x000000ff;
+    hash[30] = (ctx->state[7] >> 8) & 0x000000ff;
+    hash[31] = (ctx->state[7] >> 0) & 0x000000ff;
 }

@@ -13,7 +13,7 @@ typedef struct
     WORD state[8];
 } CUDA_SHA256_CTX;
 
-__device__ __forceinline__ void cuda_sha256_transform(CUDA_SHA256_CTX *ctx, const BYTE data[]);
+__device__ void cuda_sha256_transform(CUDA_SHA256_CTX *ctx, const BYTE data[]);
 
 __device__ void cuda_sha256_init(CUDA_SHA256_CTX *ctx);
 
