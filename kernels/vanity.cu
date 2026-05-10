@@ -56,26 +56,30 @@ static __device__ __forceinline__ void vanity_emit_sha256_digest(const CUDA_SHA2
     hash[31] = (ctx->state[7] >> 0) & 0x000000ff;
 }
 
+/* build the second 64-byte SHA-256 block (loop-invariant: depends only on owner).
+   layout: owner[16..31] || 0x80 || 47 zero bytes || big-endian 64-bit length=640. */
+static __device__ __forceinline__ void vanity_build_b1(const BYTE *owner, BYTE b1[64])
+{
+    memset(b1, 0, 64);
+    memcpy(b1, owner + 16, 16);
+    b1[16] = (BYTE)0x80;
+    b1[62] = (BYTE)0x02;
+    b1[63] = (BYTE)0x80;
+}
+
 static __device__ __forceinline__ void vanity_pubkey_sha256(const BYTE *base,
                                                               const BYTE *seed16,
                                                               const BYTE *owner,
+                                                              const BYTE *b1,
                                                               BYTE out[32])
 {
     CUDA_SHA256_CTX ctx;
     BYTE b0[64];
-    BYTE b1[64];
     cuda_sha256_init(&ctx);
     memcpy(b0, base, 32);
     memcpy(b0 + 32, seed16, 16);
     memcpy(b0 + 48, owner, 16);
     cuda_sha256_transform(&ctx, b0);
-    memset(b1, 0, sizeof(b1));
-    memcpy(b1, owner + 16, 16);
-    b1[16] = (BYTE)0x80;
-    /* bit length = 80 * 8 = 640 = 0x280, big-endian in [56..63]; only the
-       low two bytes are non-zero. the other 6 bytes stay 0 from memset. */
-    b1[62] = (BYTE)0x02;
-    b1[63] = (BYTE)0x80;
     cuda_sha256_transform(&ctx, b1);
     vanity_emit_sha256_digest(&ctx, out);
 }
@@ -233,6 +237,10 @@ vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
     lw[3] += k;
     unsigned char local_encoded[44] = {0};
 
+    /* loop-invariant SHA-256 padding block */
+    BYTE sha_block1[64];
+    vanity_build_b1(owner, sha_block1);
+
     unsigned long long start_clock = clock64();
     uint32_t watchdog = 1u;
 
@@ -259,7 +267,7 @@ vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
             create_account_seed[b] = glyph_from_hash_byte[local_out[b]];
         }
 
-        vanity_pubkey_sha256(base, create_account_seed, owner, local_out);
+        vanity_pubkey_sha256(base, create_account_seed, owner, sha_block1, local_out);
         ulong encoded_len = fd_base58_encode_32(local_out, (unsigned char *)(&local_encoded), d_case_insensitive);
 
         if (matches_target((unsigned char *)local_encoded, (unsigned char *)target, target_len, (unsigned char *)suffix, suffix_len, encoded_len))
