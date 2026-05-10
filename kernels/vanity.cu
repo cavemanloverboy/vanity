@@ -293,7 +293,7 @@ extern "C" void gpu_grind_destroy(void *opaque)
 
 // ─── kernel ─────────────────────────────────────────────────────────────────
 
-__global__ void __launch_bounds__(256, 4)
+__global__ void __launch_bounds__(256, 3)
 vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
 {
     (void)stride;
