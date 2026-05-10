@@ -138,6 +138,29 @@ static __device__ __forceinline__ void cuda_sha256_transform_w(WORD state[8], co
     state[7] += h;
 }
 
+/* Variant that takes a partially populated W[0..15] (caller filled),
+   runs the 48-step expansion in place, then the 64 main rounds. Lets
+   the caller skip the byte-swap of any loop-invariant input words by
+   pre-loading them from elsewhere (e.g. __constant__ memory). */
+static __device__ __forceinline__ void cuda_sha256_transform_from_w16(WORD state[8], WORD W[64])
+{
+    VANITY_SHA_EXPAND48(W);
+
+    WORD a = state[0], b = state[1], c = state[2], d = state[3];
+    WORD e = state[4], f = state[5], g = state[6], h = state[7];
+
+    VANITY_SHA_ROUNDS(W);
+
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
+    state[4] += e;
+    state[5] += f;
+    state[6] += g;
+    state[7] += h;
+}
+
 __device__ void cuda_sha256_init(CUDA_SHA256_CTX *ctx);
 __device__ void cuda_sha256_final(CUDA_SHA256_CTX *ctx, BYTE hash[]);
 __device__ void cuda_sha256_update(CUDA_SHA256_CTX *ctx, const BYTE data[], size_t len);

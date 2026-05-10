@@ -23,6 +23,12 @@ extern __constant__ uint8_t d_match_lut[58];
    via constant cache, eliminating ~256 bytes of per-thread stack. */
 __constant__ WORD d_sha_W1[64];
 
+/* Loop-invariant slots of SHA-256 block-0 message schedule:
+     [0..7]   = byte-swapped `base`  (32 bytes)
+     [12..15] = byte-swapped `owner[0..15]`
+   Slots [8..11] (= seed16) are built per-iter and overwritten. */
+__constant__ WORD d_sha_W0_fixed[16];
+
 // SHA-256 pubkey (exact layout: base[32] || seed16[16] || owner[32] = 80 bytes) ─
 // saves per-iteration ctx clone + 48 generic byte-sha256_update passes.
 
@@ -63,18 +69,23 @@ static __device__ __forceinline__ void vanity_emit_sha256_digest(const CUDA_SHA2
     hash[31] = (ctx->state[7] >> 0) & 0x000000ff;
 }
 
-static __device__ __forceinline__ void vanity_pubkey_sha256(const BYTE *base,
-                                                              const BYTE *seed16,
-                                                              const BYTE *owner,
-                                                              BYTE out[32])
+static __device__ __forceinline__ void vanity_pubkey_sha256(const BYTE *seed16, BYTE out[32])
 {
+    /* Build block-0 message schedule [0..15]: load fixed slots from
+       constant memory, byte-swap seed16 into [8..11]. */
+    WORD W0[64];
+#pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        W0[i] = d_sha_W0_fixed[i];
+    }
+    W0[ 8] = ((WORD)seed16[ 0] << 24) | ((WORD)seed16[ 1] << 16) | ((WORD)seed16[ 2] << 8) | (WORD)seed16[ 3];
+    W0[ 9] = ((WORD)seed16[ 4] << 24) | ((WORD)seed16[ 5] << 16) | ((WORD)seed16[ 6] << 8) | (WORD)seed16[ 7];
+    W0[10] = ((WORD)seed16[ 8] << 24) | ((WORD)seed16[ 9] << 16) | ((WORD)seed16[10] << 8) | (WORD)seed16[11];
+    W0[11] = ((WORD)seed16[12] << 24) | ((WORD)seed16[13] << 16) | ((WORD)seed16[14] << 8) | (WORD)seed16[15];
+
     CUDA_SHA256_CTX ctx;
-    BYTE b0[64];
     cuda_sha256_init(&ctx);
-    memcpy(b0, base, 32);
-    memcpy(b0 + 32, seed16, 16);
-    memcpy(b0 + 48, owner, 16);
-    cuda_sha256_transform(&ctx, b0);
+    cuda_sha256_transform_from_w16(ctx.state, W0);
     cuda_sha256_transform_w(ctx.state, d_sha_W1);
     vanity_emit_sha256_digest(&ctx, out);
 }
@@ -187,10 +198,7 @@ extern "C" void* gpu_grind_init(
 
     cudaMemcpyToSymbol(d_match_lut, host_match_lut, sizeof(host_match_lut));
 
-    /* Precompute SHA-256 block-1 message schedule from owner. This is the
-       same construction as vanity_build_b1 + cuda_sha256_expand_w, done
-       on the host so the result lives in __constant__ memory rather than
-       stack. */
+    /* Precompute SHA-256 block-1 message schedule from owner. */
     {
         BYTE b1[64];
         memset(b1, 0, sizeof(b1));
@@ -209,6 +217,22 @@ extern "C" void* gpu_grind_init(
                        + SIG0(host_W1[i-15]) + host_W1[i-16];
         }
         cudaMemcpyToSymbol(d_sha_W1, host_W1, sizeof(host_W1));
+    }
+
+    /* Precompute loop-invariant slots of SHA-256 block-0 message schedule:
+       [0..7] from base, [12..15] from owner[0..15]. Slots [8..11] are
+       built per-iter from seed16. */
+    {
+        WORD host_W0[16] = {0};
+        for (int i = 0; i < 8; ++i) {
+            host_W0[i] = ((WORD)base[4*i    ] << 24) | ((WORD)base[4*i + 1] << 16)
+                       | ((WORD)base[4*i + 2] <<  8) | ((WORD)base[4*i + 3]      );
+        }
+        for (int i = 0; i < 4; ++i) {
+            host_W0[12 + i] = ((WORD)owner[4*i    ] << 24) | ((WORD)owner[4*i + 1] << 16)
+                            | ((WORD)owner[4*i + 2] <<  8) | ((WORD)owner[4*i + 3]      );
+        }
+        cudaMemcpyToSymbol(d_sha_W0_fixed, host_W0, sizeof(host_W0));
     }
 
     {
@@ -320,7 +344,7 @@ vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
             create_account_seed[b] = glyph_from_hash_byte[local_out[b]];
         }
 
-        vanity_pubkey_sha256(base, create_account_seed, owner, local_out);
+        vanity_pubkey_sha256(create_account_seed, local_out);
 
         if (fd_base58_check_match_32(local_out, target, target_len, suffix, suffix_len))
         {
