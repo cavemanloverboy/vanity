@@ -11,10 +11,12 @@
 
 __device__ int done = 0;
 __device__ unsigned long long count = 0;
-__device__ bool d_case_insensitive = false;
 
 /* Filled once in gpu_grind_init(): glyph_from_byte[i] maps hash byte → PDA seed char. */
 __device__ uint8_t glyph_from_hash_byte[256];
+
+/* Canonicalizing LUT lives in base58.cu; gpu_grind_init uploads it here. */
+extern __constant__ uint8_t d_match_lut[58];
 
 // SHA-256 pubkey (exact layout: base[32] || seed16[16] || owner[32] = 80 bytes) ─
 // saves per-iteration ctx clone + 48 generic byte-sha256_update passes.
@@ -143,15 +145,54 @@ extern "C" void* gpu_grind_init(
         exit(EXIT_FAILURE);
     }
 
-    // Upload invariant data (everything after the 32-byte seed slot)
+    /* Build canonicalization LUT (raw_base58 idx -> match key) and pre-
+       translate target/suffix from ASCII to those same canonical indices.
+       In normal mode the LUT is identity; in CI mode, raw indices that
+       encode the same character (e.g. both 9 and 33 -> 'a') fold to the
+       lower index. */
+    static const char alphabet_normal[59] =
+        "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    static const char alphabet_ci[59] =
+        "123456789abcdefghjkLmnpqrstuvwxyzabcdefghijkmnopqrstuvwxyz";
+    const char *alphabet = case_insensitive ? alphabet_ci : alphabet_normal;
+
+    uint8_t host_match_lut[58];
+    for (int i = 0; i < 58; ++i) {
+        host_match_lut[i] = (uint8_t)i;
+        for (int j = 0; j < i; ++j) {
+            if (alphabet[j] == alphabet[i]) {
+                host_match_lut[i] = (uint8_t)j;
+                break;
+            }
+        }
+    }
+
+    /* Translate ASCII target/suffix to canonical indices in host buffers. */
+    uint8_t target_idx[64];
+    uint8_t suffix_idx[64];
+    for (uint64_t i = 0; i < target_len; ++i) {
+        uint8_t v = 255;
+        for (int k = 0; k < 58; ++k) {
+            if ((uint8_t)alphabet[k] == target[i]) { v = host_match_lut[k]; break; }
+        }
+        target_idx[i] = v;
+    }
+    for (uint64_t i = 0; i < suffix_len; ++i) {
+        uint8_t v = 255;
+        for (int k = 0; k < 58; ++k) {
+            if ((uint8_t)alphabet[k] == suffix[i]) { v = host_match_lut[k]; break; }
+        }
+        suffix_idx[i] = v;
+    }
+
     cudaMemcpy(ctx->d_buffer + 32, base, 32, cudaMemcpyHostToDevice);
     cudaMemcpy(ctx->d_buffer + 64, owner, 32, cudaMemcpyHostToDevice);
     cudaMemcpy(ctx->d_buffer + 96, &target_len, 8, cudaMemcpyHostToDevice);
-    if (target_len > 0) cudaMemcpy(ctx->d_buffer + 104, target, target_len, cudaMemcpyHostToDevice);
+    if (target_len > 0) cudaMemcpy(ctx->d_buffer + 104, target_idx, target_len, cudaMemcpyHostToDevice);
     cudaMemcpy(ctx->d_buffer + 104 + target_len, &suffix_len, 8, cudaMemcpyHostToDevice);
-    if (suffix_len > 0) cudaMemcpy(ctx->d_buffer + 104 + target_len + 8, suffix, suffix_len, cudaMemcpyHostToDevice);
+    if (suffix_len > 0) cudaMemcpy(ctx->d_buffer + 104 + target_len + 8, suffix_idx, suffix_len, cudaMemcpyHostToDevice);
 
-    cudaMemcpyToSymbol(d_case_insensitive, &case_insensitive, 1, 0, cudaMemcpyHostToDevice);
+    cudaMemcpyToSymbol(d_match_lut, host_match_lut, sizeof(host_match_lut));
 
     {
         uint8_t host_lut[256];
@@ -268,7 +309,7 @@ vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
 
         vanity_pubkey_sha256(base, create_account_seed, owner, sha_block1, local_out);
 
-        if (fd_base58_check_match_32(local_out, target, target_len, suffix, suffix_len, d_case_insensitive))
+        if (fd_base58_check_match_32(local_out, target, target_len, suffix, suffix_len))
         {
             if (atomicMax(&done, 1) == 0)
             {

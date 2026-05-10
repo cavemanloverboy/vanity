@@ -4,6 +4,13 @@ __device__ uint8_t const base58_chars[] = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcd
 // ci = case insensitive (map all uppercase to lowercase except for L)
 __device__ uint8_t const base58_chars_ci[] = "123456789abcdefghjkLmnpqrstuvwxyzabcdefghijkmnopqrstuvwxyz";
 
+/* Canonicalizing LUT for fd_base58_check_match_32. Uploaded once per
+   launch by gpu_grind_init. In normal (case-sensitive) mode this is
+   identity; in CI mode it folds the multiple raw indices that encode
+   the same character to a single canonical index, so the inner compare
+   is always raw_base58[i] -> d_match_lut[...] vs precomputed target. */
+__constant__ uint8_t d_match_lut[58];
+
 #define BASE58_INVALID_CHAR ((uint8_t)255)
 #define BASE58_INVERSE_TABLE_OFFSET ((uint8_t)'1')
 #define BASE58_INVERSE_TABLE_SENTINEL ((uint8_t)(1UL + (uint8_t)('z') - BASE58_INVERSE_TABLE_OFFSET))
@@ -239,14 +246,17 @@ __device__ ulong fd_base58_encode_32(uint8_t *bytes,
        mismatch (~98% of attempts for short prefixes) we skip the rest of
        the digit conversion AND the full 44-char ASCII output write that
        fd_base58_encode_32 always performs.
-     - no output buffer is needed; the b58_chars[] lookup is only applied
-       to the (target_len + suffix_len) characters actually compared. */
+     - no output buffer is needed; comparisons go straight against
+       canonical raw_base58 indices through a __constant__ LUT, so neither
+       a b58_chars[] lookup nor a case_insensitive branch is in the path.
+
+   `target` and `suffix` are arrays of canonical raw_base58 indices
+   (0..57) precomputed on the host via gpu_grind_init. */
 __device__ bool fd_base58_check_match_32(uint8_t *bytes,
                                          const uint8_t *target,
                                          ulong target_len,
                                          const uint8_t *suffix,
-                                         ulong suffix_len,
-                                         bool case_insensitive)
+                                         ulong suffix_len)
 {
     ulong in_leading_0s = 0UL;
     for (; in_leading_0s < BYTE_CNT; in_leading_0s++)
@@ -308,8 +318,6 @@ __device__ bool fd_base58_check_match_32(uint8_t *bytes,
         raw_leading_0s++;
     }
 
-    const uint8_t *b58_chars_p = case_insensitive ? base58_chars_ci : base58_chars;
-
     ulong skip = raw_leading_0s - in_leading_0s;
     ulong encoded_length = RAW58_SZ - skip;
 
@@ -318,7 +326,7 @@ __device__ bool fd_base58_check_match_32(uint8_t *bytes,
     {
         ulong rb_idx = skip + i;
         ENSURE_LIMB(rb_idx / 5UL);
-        if (b58_chars_p[raw_base58[rb_idx]] != target[i])
+        if (d_match_lut[raw_base58[rb_idx]] != target[i])
             return false;
     }
 
@@ -331,7 +339,7 @@ __device__ bool fd_base58_check_match_32(uint8_t *bytes,
         ENSURE_LIMB(last_limb);
         for (ulong i = 0UL; i < suffix_len; i++)
         {
-            if (b58_chars_p[raw_base58[tail_start + i]] != suffix[i])
+            if (d_match_lut[raw_base58[tail_start + i]] != suffix[i])
                 return false;
         }
     }
