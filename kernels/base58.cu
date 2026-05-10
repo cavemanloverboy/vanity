@@ -228,6 +228,120 @@ __device__ ulong fd_base58_encode_32(uint8_t *bytes,
     return encoded_length;
 }
 
+/* fused base58 encode + prefix/suffix match with early rejection.
+   returns true iff base58(bytes) starts with `target` (length target_len)
+   AND ends with `suffix` (length suffix_len).
+
+   optimization vs fd_base58_encode_32 + matches_target:
+     - only the multiply + carry phase is unconditional.
+     - limbs (raw_base58 digits) are emitted lazily, just enough to cover
+       the indices the prefix touches; on the typical first-character
+       mismatch (~98% of attempts for short prefixes) we skip the rest of
+       the digit conversion AND the full 44-char ASCII output write that
+       fd_base58_encode_32 always performs.
+     - no output buffer is needed; the b58_chars[] lookup is only applied
+       to the (target_len + suffix_len) characters actually compared. */
+__device__ bool fd_base58_check_match_32(uint8_t *bytes,
+                                         const uint8_t *target,
+                                         ulong target_len,
+                                         const uint8_t *suffix,
+                                         ulong suffix_len,
+                                         bool case_insensitive)
+{
+    ulong in_leading_0s = 0UL;
+    for (; in_leading_0s < BYTE_CNT; in_leading_0s++)
+        if (bytes[in_leading_0s])
+            break;
+
+    uint binary[BINARY_SZ];
+    for (ulong i = 0UL; i < BINARY_SZ; i++)
+    {
+        uint u32;
+        memcpy(&u32, &bytes[i * sizeof(uint)], 4);
+        binary[i] = ((u32 & 0x000000FF) << 24) |
+                    ((u32 & 0x0000FF00) << 8) |
+                    ((u32 & 0x00FF0000) >> 8) |
+                    ((u32 & 0xFF000000) >> 24);
+    }
+
+    ulong R1div = 656356768UL; /* = 58^5 */
+
+    ulong intermediate[INTERMEDIATE_SZ_W_PADDING] = {0};
+    for (ulong i = 0UL; i < BINARY_SZ; i++)
+        for (ulong j = 0UL; j < INTERMEDIATE_SZ - 1UL; j++)
+            intermediate[j + 1UL] += (ulong)binary[i] * (ulong)enc_table_32[i][j];
+
+    for (ulong i = INTERMEDIATE_SZ - 1UL; i > 0UL; i--)
+    {
+        intermediate[i - 1UL] += (intermediate[i] / R1div);
+        intermediate[i] %= R1div;
+    }
+
+    /* Lazy limb -> raw_base58 digit emission. We track `limbs_done` and
+       only emit limbs we need to satisfy the prefix/suffix lookups. */
+    uint8_t raw_base58[RAW58_SZ];
+    ulong limbs_done = 0UL;
+    #define EMIT_LIMB(L) do { \
+        uint v = (uint)intermediate[(L)]; \
+        raw_base58[5UL*(L) + 4UL] = (uint8_t)((v / 1U) % 58U); \
+        raw_base58[5UL*(L) + 3UL] = (uint8_t)((v / 58U) % 58U); \
+        raw_base58[5UL*(L) + 2UL] = (uint8_t)((v / 3364U) % 58U); \
+        raw_base58[5UL*(L) + 1UL] = (uint8_t)((v / 195112U) % 58U); \
+        raw_base58[5UL*(L) + 0UL] = (uint8_t)(v / 11316496U); \
+    } while (0)
+    #define ENSURE_LIMB(L) do { \
+        while (limbs_done <= (L)) { EMIT_LIMB(limbs_done); limbs_done++; } \
+    } while (0)
+
+    /* always need the first limb to discover raw_leading_0s for typical
+       inputs (raw_leading_0s in {0,1} dominates random hashes). */
+    ENSURE_LIMB(0UL);
+
+    /* find raw_leading_0s, expanding limbs only if the first ones are 0. */
+    ulong raw_leading_0s = 0UL;
+    while (raw_leading_0s < RAW58_SZ)
+    {
+        if (raw_leading_0s / 5UL >= limbs_done)
+            ENSURE_LIMB(raw_leading_0s / 5UL);
+        if (raw_base58[raw_leading_0s])
+            break;
+        raw_leading_0s++;
+    }
+
+    const uint8_t *b58_chars_p = case_insensitive ? base58_chars_ci : base58_chars;
+
+    ulong skip = raw_leading_0s - in_leading_0s;
+    ulong encoded_length = RAW58_SZ - skip;
+
+    /* prefix check: emit limbs lazily, bail on first mismatch. */
+    for (ulong i = 0UL; i < target_len; i++)
+    {
+        ulong rb_idx = skip + i;
+        ENSURE_LIMB(rb_idx / 5UL);
+        if (b58_chars_p[raw_base58[rb_idx]] != target[i])
+            return false;
+    }
+
+    /* suffix check: only reached on prefix match (rare). emit any
+       remaining limbs needed by the tail. */
+    if (suffix_len > 0UL)
+    {
+        ulong tail_start = skip + encoded_length - suffix_len;
+        ulong last_limb = (skip + encoded_length - 1UL) / 5UL;
+        ENSURE_LIMB(last_limb);
+        for (ulong i = 0UL; i < suffix_len; i++)
+        {
+            if (b58_chars_p[raw_base58[tail_start + i]] != suffix[i])
+                return false;
+        }
+    }
+
+    return true;
+
+    #undef EMIT_LIMB
+    #undef ENSURE_LIMB
+}
+
 #undef RAW58_SZ
 #undef ENCODED_SZ
 #undef SUFFIX

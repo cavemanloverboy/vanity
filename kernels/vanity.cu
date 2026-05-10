@@ -235,7 +235,6 @@ vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
     lw[1] += k;
     lw[2] += k;
     lw[3] += k;
-    unsigned char local_encoded[44] = {0};
 
     /* loop-invariant SHA-256 padding block */
     BYTE sha_block1[64];
@@ -268,9 +267,8 @@ vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
         }
 
         vanity_pubkey_sha256(base, create_account_seed, owner, sha_block1, local_out);
-        ulong encoded_len = fd_base58_encode_32(local_out, (unsigned char *)(&local_encoded), d_case_insensitive);
 
-        if (matches_target((unsigned char *)local_encoded, (unsigned char *)target, target_len, (unsigned char *)suffix, suffix_len, encoded_len))
+        if (fd_base58_check_match_32(local_out, target, target_len, suffix, suffix_len, d_case_insensitive))
         {
             if (atomicMax(&done, 1) == 0)
             {
@@ -281,19 +279,4 @@ vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
             return;
         }
     }
-}
-
-__device__ bool matches_target(unsigned char *a, unsigned char *target, uint64_t n, unsigned char *suffix, uint64_t suffix_len, ulong encoded_len)
-{
-    for (int i = 0; i < n; i++)
-    {
-        if (a[i] != target[i])
-            return false;
-    }
-    for (int i = 0; i < suffix_len; i++)
-    {
-        if (a[encoded_len - suffix_len + i] != suffix[i])
-            return false;
-    }
-    return true;
 }

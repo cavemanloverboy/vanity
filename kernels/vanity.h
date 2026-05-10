@@ -11,6 +11,5 @@ extern "C" void  gpu_grind_read(void *ctx, uint8_t *out);
 extern "C" void  gpu_grind_destroy(void *ctx);
 
 __global__ void vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles);
-__device__ bool matches_target(unsigned char *a, unsigned char *target, uint64_t n, unsigned char *suffix, uint64_t suffix_len, ulong encoded_len);
 
 #endif
