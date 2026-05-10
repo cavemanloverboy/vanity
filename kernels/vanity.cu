@@ -29,65 +29,36 @@ __constant__ WORD d_sha_W1[64];
    Slots [8..11] (= seed16) are built per-iter and overwritten. */
 __constant__ WORD d_sha_W0_fixed[16];
 
-// SHA-256 pubkey (exact layout: base[32] || seed16[16] || owner[32] = 80 bytes) ─
-// saves per-iteration ctx clone + 48 generic byte-sha256_update passes.
-
-static __device__ __forceinline__ void vanity_emit_sha256_digest(const CUDA_SHA256_CTX *ctx,
-                                                                 BYTE hash[32])
+/* SHA-256 of base[32] || seed16[16] || owner[32] = 80 bytes, in pure
+   word form: caller passes 4 words for seed16 (already big-endian
+   packed, MSB-first), receives 8 words of digest in `state_out`.
+   Avoids the byte-swap roundtrip that happens when the digest is
+   serialized to bytes only to be re-loaded as words by the next
+   iter's input or by base58. */
+static __device__ __forceinline__ void vanity_pubkey_sha256_words(const WORD seed_words[4],
+                                                                  WORD state_out[8])
 {
-    hash[0] = (ctx->state[0] >> 24) & 0x000000ff;
-    hash[1] = (ctx->state[0] >> 16) & 0x000000ff;
-    hash[2] = (ctx->state[0] >> 8) & 0x000000ff;
-    hash[3] = (ctx->state[0] >> 0) & 0x000000ff;
-    hash[4] = (ctx->state[1] >> 24) & 0x000000ff;
-    hash[5] = (ctx->state[1] >> 16) & 0x000000ff;
-    hash[6] = (ctx->state[1] >> 8) & 0x000000ff;
-    hash[7] = (ctx->state[1] >> 0) & 0x000000ff;
-    hash[8] = (ctx->state[2] >> 24) & 0x000000ff;
-    hash[9] = (ctx->state[2] >> 16) & 0x000000ff;
-    hash[10] = (ctx->state[2] >> 8) & 0x000000ff;
-    hash[11] = (ctx->state[2] >> 0) & 0x000000ff;
-    hash[12] = (ctx->state[3] >> 24) & 0x000000ff;
-    hash[13] = (ctx->state[3] >> 16) & 0x000000ff;
-    hash[14] = (ctx->state[3] >> 8) & 0x000000ff;
-    hash[15] = (ctx->state[3] >> 0) & 0x000000ff;
-    hash[16] = (ctx->state[4] >> 24) & 0x000000ff;
-    hash[17] = (ctx->state[4] >> 16) & 0x000000ff;
-    hash[18] = (ctx->state[4] >> 8) & 0x000000ff;
-    hash[19] = (ctx->state[4] >> 0) & 0x000000ff;
-    hash[20] = (ctx->state[5] >> 24) & 0x000000ff;
-    hash[21] = (ctx->state[5] >> 16) & 0x000000ff;
-    hash[22] = (ctx->state[5] >> 8) & 0x000000ff;
-    hash[23] = (ctx->state[5] >> 0) & 0x000000ff;
-    hash[24] = (ctx->state[6] >> 24) & 0x000000ff;
-    hash[25] = (ctx->state[6] >> 16) & 0x000000ff;
-    hash[26] = (ctx->state[6] >> 8) & 0x000000ff;
-    hash[27] = (ctx->state[6] >> 0) & 0x000000ff;
-    hash[28] = (ctx->state[7] >> 24) & 0x000000ff;
-    hash[29] = (ctx->state[7] >> 16) & 0x000000ff;
-    hash[30] = (ctx->state[7] >> 8) & 0x000000ff;
-    hash[31] = (ctx->state[7] >> 0) & 0x000000ff;
-}
-
-static __device__ __forceinline__ void vanity_pubkey_sha256(const BYTE *seed16, BYTE out[32])
-{
-    /* Build block-0 message schedule [0..15]: load fixed slots from
-       constant memory, byte-swap seed16 into [8..11]. */
     WORD W0[64];
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
         W0[i] = d_sha_W0_fixed[i];
     }
-    W0[ 8] = ((WORD)seed16[ 0] << 24) | ((WORD)seed16[ 1] << 16) | ((WORD)seed16[ 2] << 8) | (WORD)seed16[ 3];
-    W0[ 9] = ((WORD)seed16[ 4] << 24) | ((WORD)seed16[ 5] << 16) | ((WORD)seed16[ 6] << 8) | (WORD)seed16[ 7];
-    W0[10] = ((WORD)seed16[ 8] << 24) | ((WORD)seed16[ 9] << 16) | ((WORD)seed16[10] << 8) | (WORD)seed16[11];
-    W0[11] = ((WORD)seed16[12] << 24) | ((WORD)seed16[13] << 16) | ((WORD)seed16[14] << 8) | (WORD)seed16[15];
+    W0[ 8] = seed_words[0];
+    W0[ 9] = seed_words[1];
+    W0[10] = seed_words[2];
+    W0[11] = seed_words[3];
 
-    CUDA_SHA256_CTX ctx;
-    cuda_sha256_init(&ctx);
-    cuda_sha256_transform_from_w16(ctx.state, W0);
-    cuda_sha256_transform_w(ctx.state, d_sha_W1);
-    vanity_emit_sha256_digest(&ctx, out);
+    state_out[0] = 0x6a09e667U;
+    state_out[1] = 0xbb67ae85U;
+    state_out[2] = 0x3c6ef372U;
+    state_out[3] = 0xa54ff53aU;
+    state_out[4] = 0x510e527fU;
+    state_out[5] = 0x9b05688cU;
+    state_out[6] = 0x1f83d9abU;
+    state_out[7] = 0x5be0cd19U;
+
+    cuda_sha256_transform_from_w16(state_out, W0);
+    cuda_sha256_transform_w(state_out, d_sha_W1);
 }
 
 // ─── persistent context ─────────────────────────────────────────────────────
@@ -298,8 +269,6 @@ vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
 {
     (void)stride;
     uint8_t *seed = buffer;
-    uint8_t *base = buffer + 32;
-    uint8_t *owner = buffer + 64;
     uint64_t target_len;
     memcpy(&target_len, buffer + 96, 8);
     uint8_t *target = buffer + 104;
@@ -309,14 +278,28 @@ vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
     uint8_t *out = (buffer + 104 + target_len + suffix_len + 8);
 
     uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
-    __align__(8) unsigned char local_out[32];
-    memcpy(local_out, seed, 32);
-    uint64_t *lw = (uint64_t *)local_out;
-    uint64_t const k = idx;
-    lw[0] += k;
-    lw[1] += k;
-    lw[2] += k;
-    lw[3] += k;
+
+    /* Bootstrap per-thread digest state. We keep the original byte-form
+       seed addition (idx mixed into each u64 lane) so semantics match
+       prior commits, then convert once into 8 big-endian-packed words.
+       Inside the loop we never go back to bytes. */
+    WORD digest_words[8];
+    {
+        __align__(8) unsigned char local_seed[32];
+        memcpy(local_seed, seed, 32);
+        uint64_t *lw = (uint64_t *)local_seed;
+        lw[0] += idx;
+        lw[1] += idx;
+        lw[2] += idx;
+        lw[3] += idx;
+#pragma unroll
+        for (int i = 0; i < 8; ++i) {
+            digest_words[i] = ((WORD)local_seed[4*i    ] << 24)
+                            | ((WORD)local_seed[4*i + 1] << 16)
+                            | ((WORD)local_seed[4*i + 2] <<  8)
+                            | ((WORD)local_seed[4*i + 3]      );
+        }
+    }
 
     unsigned long long start_clock = clock64();
     uint32_t watchdog = 1u;
@@ -338,19 +321,36 @@ vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
             }
         }
 
-        uint8_t create_account_seed[16];
+        /* Glyph-translate the first 4 digest words (= first 16 bytes
+           in big-endian byte order) and pack the resulting 16 glyph
+           bytes back into 4 big-endian words. The packed words are
+           exactly what vanity_pubkey_sha256_words wants for W0[8..11]. */
+        WORD seed_words[4];
 #pragma unroll
-        for (int b = 0; b < 16; ++b) {
-            create_account_seed[b] = glyph_from_hash_byte[local_out[b]];
+        for (int k = 0; k < 4; ++k) {
+            WORD s = digest_words[k];
+            seed_words[k] = ((WORD)glyph_from_hash_byte[(s >> 24) & 0xFFU] << 24)
+                          | ((WORD)glyph_from_hash_byte[(s >> 16) & 0xFFU] << 16)
+                          | ((WORD)glyph_from_hash_byte[(s >>  8) & 0xFFU] <<  8)
+                          | ((WORD)glyph_from_hash_byte[(s      ) & 0xFFU]      );
         }
 
-        vanity_pubkey_sha256(create_account_seed, local_out);
+        vanity_pubkey_sha256_words(seed_words, digest_words);
 
-        if (fd_base58_check_match_32(local_out, target, target_len, suffix, suffix_len))
+        if (fd_base58_check_match_32_words(digest_words, target, target_len, suffix, suffix_len))
         {
             if (atomicMax(&done, 1) == 0)
             {
-                memcpy(out, create_account_seed, 16);
+                /* Rare path: serialize the matched seed to big-endian
+                   bytes for the host to consume. */
+#pragma unroll
+                for (int k = 0; k < 4; ++k) {
+                    WORD w = seed_words[k];
+                    out[4*k    ] = (uint8_t)(w >> 24);
+                    out[4*k + 1] = (uint8_t)(w >> 16);
+                    out[4*k + 2] = (uint8_t)(w >>  8);
+                    out[4*k + 3] = (uint8_t)(w      );
+                }
             }
 
             atomicAdd(&count, iter + 1);

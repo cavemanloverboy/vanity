@@ -12,43 +12,36 @@ extern __constant__ uint8_t d_match_lut[58];
 
 __device__ ulong fd_base58_encode_32(uint8_t *bytes, uint8_t *out, bool case_insensitive);
 
-/* Fused base58 encode + prefix/suffix match with early rejection.
+/* Word-form fused base58 encode + prefix/suffix match with early
+   rejection. Caller passes the SHA-256 digest as 8 native uint words
+   (state[0..7], MSB-first interpretation), avoiding the byte-emit /
+   byte-load / byte-swap roundtrip that the byte-form caller forced
+   us into previously. The two byte-swaps cancel exactly:
+   binary[i] == state[i].
 
    `target` and `suffix` are arrays of canonical raw_base58 indices
    (0..57) precomputed on the host via gpu_grind_init. d_match_lut folds
    raw_base58 values into the same canonical space, so neither a
    b58_chars[] lookup nor a case_insensitive branch is in the path.
 
-   Optimization vs fd_base58_encode_32 + matches_target:
-     - Only the multiply + carry phase is unconditional.
-     - Limbs (raw_base58 digits) are emitted lazily, just enough to cover
-       the indices the prefix touches; on the typical first-character
-       mismatch (~98% of attempts for short prefixes) we skip the rest of
-       the digit conversion AND the full 44-char ASCII output write that
-       fd_base58_encode_32 always performs.
-
    Inlined into the call site so __launch_bounds__ register caps on the
    parent kernel apply transitively. */
-static __device__ __forceinline__ bool fd_base58_check_match_32(uint8_t *bytes,
-                                                                  const uint8_t *target,
-                                                                  ulong target_len,
-                                                                  const uint8_t *suffix,
-                                                                  ulong suffix_len)
+static __device__ __forceinline__ bool fd_base58_check_match_32_words(const uint state[8],
+                                                                       const uint8_t *target,
+                                                                       ulong target_len,
+                                                                       const uint8_t *suffix,
+                                                                       ulong suffix_len)
 {
+    /* Count leading zero bytes of the big-endian byte view of state[].
+       Each word contributes 0..4 leading zero bytes; advance through
+       words that are entirely zero. __clz lowers to a single SFU op. */
     ulong in_leading_0s = 0UL;
-    for (; in_leading_0s < 32UL; in_leading_0s++)
-        if (bytes[in_leading_0s])
-            break;
-
-    uint binary[8];
-    for (ulong i = 0UL; i < 8UL; i++)
+#pragma unroll
+    for (int i = 0; i < 8; ++i)
     {
-        uint u32;
-        memcpy(&u32, &bytes[i * sizeof(uint)], 4);
-        binary[i] = ((u32 & 0x000000FF) << 24) |
-                    ((u32 & 0x0000FF00) << 8) |
-                    ((u32 & 0x00FF0000) >> 8) |
-                    ((u32 & 0xFF000000) >> 24);
+        ulong lz_bytes = (ulong)((unsigned)__clz((int)state[i]) >> 3);
+        in_leading_0s += lz_bytes;
+        if (lz_bytes != 4UL) break;
     }
 
     ulong R1div = 656356768UL; /* = 58^5 */
@@ -56,7 +49,7 @@ static __device__ __forceinline__ bool fd_base58_check_match_32(uint8_t *bytes,
     ulong intermediate[9] = {0};
     for (ulong i = 0UL; i < 8UL; i++)
         for (ulong j = 0UL; j < 8UL; j++)
-            intermediate[j + 1UL] += (ulong)binary[i] * (ulong)enc_table_32[i][j];
+            intermediate[j + 1UL] += (ulong)state[i] * (ulong)enc_table_32[i][j];
 
     for (ulong i = 8UL; i > 0UL; i--)
     {
