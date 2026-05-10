@@ -18,6 +18,11 @@ __device__ uint8_t glyph_from_hash_byte[256];
 /* Canonicalizing LUT lives in base58.cu; gpu_grind_init uploads it here. */
 extern __constant__ uint8_t d_match_lut[58];
 
+/* Loop-invariant SHA-256 message schedule for block 1 (depends only on
+   owner). Precomputed once on the host in gpu_grind_init and broadcast
+   via constant cache, eliminating ~256 bytes of per-thread stack. */
+__constant__ WORD d_sha_W1[64];
+
 // SHA-256 pubkey (exact layout: base[32] || seed16[16] || owner[32] = 80 bytes) ─
 // saves per-iteration ctx clone + 48 generic byte-sha256_update passes.
 
@@ -58,21 +63,9 @@ static __device__ __forceinline__ void vanity_emit_sha256_digest(const CUDA_SHA2
     hash[31] = (ctx->state[7] >> 0) & 0x000000ff;
 }
 
-/* build the second 64-byte SHA-256 block (loop-invariant: depends only on owner).
-   layout: owner[16..31] || 0x80 || 47 zero bytes || big-endian 64-bit length=640. */
-static __device__ __forceinline__ void vanity_build_b1(const BYTE *owner, BYTE b1[64])
-{
-    memset(b1, 0, 64);
-    memcpy(b1, owner + 16, 16);
-    b1[16] = (BYTE)0x80;
-    b1[62] = (BYTE)0x02;
-    b1[63] = (BYTE)0x80;
-}
-
 static __device__ __forceinline__ void vanity_pubkey_sha256(const BYTE *base,
                                                               const BYTE *seed16,
                                                               const BYTE *owner,
-                                                              const WORD *W1,
                                                               BYTE out[32])
 {
     CUDA_SHA256_CTX ctx;
@@ -82,7 +75,7 @@ static __device__ __forceinline__ void vanity_pubkey_sha256(const BYTE *base,
     memcpy(b0 + 32, seed16, 16);
     memcpy(b0 + 48, owner, 16);
     cuda_sha256_transform(&ctx, b0);
-    cuda_sha256_transform_w(ctx.state, W1);
+    cuda_sha256_transform_w(ctx.state, d_sha_W1);
     vanity_emit_sha256_digest(&ctx, out);
 }
 
@@ -194,6 +187,30 @@ extern "C" void* gpu_grind_init(
 
     cudaMemcpyToSymbol(d_match_lut, host_match_lut, sizeof(host_match_lut));
 
+    /* Precompute SHA-256 block-1 message schedule from owner. This is the
+       same construction as vanity_build_b1 + cuda_sha256_expand_w, done
+       on the host so the result lives in __constant__ memory rather than
+       stack. */
+    {
+        BYTE b1[64];
+        memset(b1, 0, sizeof(b1));
+        memcpy(b1, owner + 16, 16);
+        b1[16] = (BYTE)0x80;
+        b1[62] = (BYTE)0x02;
+        b1[63] = (BYTE)0x80;
+
+        WORD host_W1[64];
+        for (int i = 0; i < 16; ++i) {
+            host_W1[i] = ((WORD)b1[4*i    ] << 24) | ((WORD)b1[4*i + 1] << 16)
+                       | ((WORD)b1[4*i + 2] <<  8) | ((WORD)b1[4*i + 3]      );
+        }
+        for (int i = 16; i < 64; ++i) {
+            host_W1[i] = SIG1(host_W1[i-2]) + host_W1[i-7]
+                       + SIG0(host_W1[i-15]) + host_W1[i-16];
+        }
+        cudaMemcpyToSymbol(d_sha_W1, host_W1, sizeof(host_W1));
+    }
+
     {
         uint8_t host_lut[256];
         static const char alnum[63] = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
@@ -277,16 +294,6 @@ vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
     lw[2] += k;
     lw[3] += k;
 
-    /* loop-invariant SHA-256 block-1 message schedule (depends only on
-       owner). precompute W once, skip 16 byte-swaps + 48 SIG/add ops in
-       every iteration. */
-    WORD sha_W1[64];
-    {
-        BYTE sha_block1[64];
-        vanity_build_b1(owner, sha_block1);
-        cuda_sha256_expand_w(sha_block1, sha_W1);
-    }
-
     unsigned long long start_clock = clock64();
     uint32_t watchdog = 1u;
 
@@ -313,7 +320,7 @@ vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
             create_account_seed[b] = glyph_from_hash_byte[local_out[b]];
         }
 
-        vanity_pubkey_sha256(base, create_account_seed, owner, sha_W1, local_out);
+        vanity_pubkey_sha256(base, create_account_seed, owner, local_out);
 
         if (fd_base58_check_match_32(local_out, target, target_len, suffix, suffix_len))
         {
