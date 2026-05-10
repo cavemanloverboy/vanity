@@ -820,6 +820,137 @@ __device__ void cuda_sha256_transform(CUDA_SHA256_CTX *ctx, const BYTE data[])
     ctx->state[7] += h;
 }
 
+__device__ void cuda_sha256_expand_w(const BYTE data[64], WORD W[64])
+{
+    W[0] = (data[0] << 24) | (data[1] << 16) | (data[2] << 8) | (data[3]);
+    W[1] = (data[4] << 24) | (data[5] << 16) | (data[6] << 8) | (data[7]);
+    W[2] = (data[8] << 24) | (data[9] << 16) | (data[10] << 8) | (data[11]);
+    W[3] = (data[12] << 24) | (data[13] << 16) | (data[14] << 8) | (data[15]);
+    W[4] = (data[16] << 24) | (data[17] << 16) | (data[18] << 8) | (data[19]);
+    W[5] = (data[20] << 24) | (data[21] << 16) | (data[22] << 8) | (data[23]);
+    W[6] = (data[24] << 24) | (data[25] << 16) | (data[26] << 8) | (data[27]);
+    W[7] = (data[28] << 24) | (data[29] << 16) | (data[30] << 8) | (data[31]);
+    W[8] = (data[32] << 24) | (data[33] << 16) | (data[34] << 8) | (data[35]);
+    W[9] = (data[36] << 24) | (data[37] << 16) | (data[38] << 8) | (data[39]);
+    W[10] = (data[40] << 24) | (data[41] << 16) | (data[42] << 8) | (data[43]);
+    W[11] = (data[44] << 24) | (data[45] << 16) | (data[46] << 8) | (data[47]);
+    W[12] = (data[48] << 24) | (data[49] << 16) | (data[50] << 8) | (data[51]);
+    W[13] = (data[52] << 24) | (data[53] << 16) | (data[54] << 8) | (data[55]);
+    W[14] = (data[56] << 24) | (data[57] << 16) | (data[58] << 8) | (data[59]);
+    W[15] = (data[60] << 24) | (data[61] << 16) | (data[62] << 8) | (data[63]);
+    W[16] = SIG1(W[14]) + W[9] + SIG0(W[1]) + W[0];
+    W[17] = SIG1(W[15]) + W[10] + SIG0(W[2]) + W[1];
+    W[18] = SIG1(W[16]) + W[11] + SIG0(W[3]) + W[2];
+    W[19] = SIG1(W[17]) + W[12] + SIG0(W[4]) + W[3];
+    W[20] = SIG1(W[18]) + W[13] + SIG0(W[5]) + W[4];
+    W[21] = SIG1(W[19]) + W[14] + SIG0(W[6]) + W[5];
+    W[22] = SIG1(W[20]) + W[15] + SIG0(W[7]) + W[6];
+    W[23] = SIG1(W[21]) + W[16] + SIG0(W[8]) + W[7];
+    W[24] = SIG1(W[22]) + W[17] + SIG0(W[9]) + W[8];
+    W[25] = SIG1(W[23]) + W[18] + SIG0(W[10]) + W[9];
+    W[26] = SIG1(W[24]) + W[19] + SIG0(W[11]) + W[10];
+    W[27] = SIG1(W[25]) + W[20] + SIG0(W[12]) + W[11];
+    W[28] = SIG1(W[26]) + W[21] + SIG0(W[13]) + W[12];
+    W[29] = SIG1(W[27]) + W[22] + SIG0(W[14]) + W[13];
+    W[30] = SIG1(W[28]) + W[23] + SIG0(W[15]) + W[14];
+    W[31] = SIG1(W[29]) + W[24] + SIG0(W[16]) + W[15];
+    W[32] = SIG1(W[30]) + W[25] + SIG0(W[17]) + W[16];
+    W[33] = SIG1(W[31]) + W[26] + SIG0(W[18]) + W[17];
+    W[34] = SIG1(W[32]) + W[27] + SIG0(W[19]) + W[18];
+    W[35] = SIG1(W[33]) + W[28] + SIG0(W[20]) + W[19];
+    W[36] = SIG1(W[34]) + W[29] + SIG0(W[21]) + W[20];
+    W[37] = SIG1(W[35]) + W[30] + SIG0(W[22]) + W[21];
+    W[38] = SIG1(W[36]) + W[31] + SIG0(W[23]) + W[22];
+    W[39] = SIG1(W[37]) + W[32] + SIG0(W[24]) + W[23];
+    W[40] = SIG1(W[38]) + W[33] + SIG0(W[25]) + W[24];
+    W[41] = SIG1(W[39]) + W[34] + SIG0(W[26]) + W[25];
+    W[42] = SIG1(W[40]) + W[35] + SIG0(W[27]) + W[26];
+    W[43] = SIG1(W[41]) + W[36] + SIG0(W[28]) + W[27];
+    W[44] = SIG1(W[42]) + W[37] + SIG0(W[29]) + W[28];
+    W[45] = SIG1(W[43]) + W[38] + SIG0(W[30]) + W[29];
+    W[46] = SIG1(W[44]) + W[39] + SIG0(W[31]) + W[30];
+    W[47] = SIG1(W[45]) + W[40] + SIG0(W[32]) + W[31];
+    W[48] = SIG1(W[46]) + W[41] + SIG0(W[33]) + W[32];
+    W[49] = SIG1(W[47]) + W[42] + SIG0(W[34]) + W[33];
+    W[50] = SIG1(W[48]) + W[43] + SIG0(W[35]) + W[34];
+    W[51] = SIG1(W[49]) + W[44] + SIG0(W[36]) + W[35];
+    W[52] = SIG1(W[50]) + W[45] + SIG0(W[37]) + W[36];
+    W[53] = SIG1(W[51]) + W[46] + SIG0(W[38]) + W[37];
+    W[54] = SIG1(W[52]) + W[47] + SIG0(W[39]) + W[38];
+    W[55] = SIG1(W[53]) + W[48] + SIG0(W[40]) + W[39];
+    W[56] = SIG1(W[54]) + W[49] + SIG0(W[41]) + W[40];
+    W[57] = SIG1(W[55]) + W[50] + SIG0(W[42]) + W[41];
+    W[58] = SIG1(W[56]) + W[51] + SIG0(W[43]) + W[42];
+    W[59] = SIG1(W[57]) + W[52] + SIG0(W[44]) + W[43];
+    W[60] = SIG1(W[58]) + W[53] + SIG0(W[45]) + W[44];
+    W[61] = SIG1(W[59]) + W[54] + SIG0(W[46]) + W[45];
+    W[62] = SIG1(W[60]) + W[55] + SIG0(W[47]) + W[46];
+    W[63] = SIG1(W[61]) + W[56] + SIG0(W[48]) + W[47];
+}
+
+/* 64 main rounds against an externally-provided W[0..63]. Identical
+   semantics to cuda_sha256_transform's compression phase. */
+__device__ void cuda_sha256_transform_w(WORD state[8], const WORD W[64])
+{
+    WORD a = state[0], b = state[1], c = state[2], d = state[3];
+    WORD e = state[4], f = state[5], g = state[6], h = state[7];
+    WORD t1, t2;
+
+#define VANITY_SHA_R(j, k_const)                              \
+    do {                                                      \
+        t1 = h + EP1(e) + CH(e, f, g) + (k_const) + W[(j)];   \
+        t2 = EP0(a) + MAJ(a, b, c);                           \
+        h = g; g = f; f = e;                                  \
+        e = d + t1;                                           \
+        d = c; c = b; b = a;                                  \
+        a = t1 + t2;                                          \
+    } while (0)
+
+    VANITY_SHA_R( 0, 0x428A2F98U); VANITY_SHA_R( 1, 0x71374491U);
+    VANITY_SHA_R( 2, 0xB5C0FBCFU); VANITY_SHA_R( 3, 0xE9B5DBA5U);
+    VANITY_SHA_R( 4, 0x3956C25BU); VANITY_SHA_R( 5, 0x59F111F1U);
+    VANITY_SHA_R( 6, 0x923F82A4U); VANITY_SHA_R( 7, 0xAB1C5ED5U);
+    VANITY_SHA_R( 8, 0xD807AA98U); VANITY_SHA_R( 9, 0x12835B01U);
+    VANITY_SHA_R(10, 0x243185BEU); VANITY_SHA_R(11, 0x550C7DC3U);
+    VANITY_SHA_R(12, 0x72BE5D74U); VANITY_SHA_R(13, 0x80DEB1FEU);
+    VANITY_SHA_R(14, 0x9BDC06A7U); VANITY_SHA_R(15, 0xC19BF174U);
+    VANITY_SHA_R(16, 0xE49B69C1U); VANITY_SHA_R(17, 0xEFBE4786U);
+    VANITY_SHA_R(18, 0x0FC19DC6U); VANITY_SHA_R(19, 0x240CA1CCU);
+    VANITY_SHA_R(20, 0x2DE92C6FU); VANITY_SHA_R(21, 0x4A7484AAU);
+    VANITY_SHA_R(22, 0x5CB0A9DCU); VANITY_SHA_R(23, 0x76F988DAU);
+    VANITY_SHA_R(24, 0x983E5152U); VANITY_SHA_R(25, 0xA831C66DU);
+    VANITY_SHA_R(26, 0xB00327C8U); VANITY_SHA_R(27, 0xBF597FC7U);
+    VANITY_SHA_R(28, 0xC6E00BF3U); VANITY_SHA_R(29, 0xD5A79147U);
+    VANITY_SHA_R(30, 0x06CA6351U); VANITY_SHA_R(31, 0x14292967U);
+    VANITY_SHA_R(32, 0x27B70A85U); VANITY_SHA_R(33, 0x2E1B2138U);
+    VANITY_SHA_R(34, 0x4D2C6DFCU); VANITY_SHA_R(35, 0x53380D13U);
+    VANITY_SHA_R(36, 0x650A7354U); VANITY_SHA_R(37, 0x766A0ABBU);
+    VANITY_SHA_R(38, 0x81C2C92EU); VANITY_SHA_R(39, 0x92722C85U);
+    VANITY_SHA_R(40, 0xA2BFE8A1U); VANITY_SHA_R(41, 0xA81A664BU);
+    VANITY_SHA_R(42, 0xC24B8B70U); VANITY_SHA_R(43, 0xC76C51A3U);
+    VANITY_SHA_R(44, 0xD192E819U); VANITY_SHA_R(45, 0xD6990624U);
+    VANITY_SHA_R(46, 0xF40E3585U); VANITY_SHA_R(47, 0x106AA070U);
+    VANITY_SHA_R(48, 0x19A4C116U); VANITY_SHA_R(49, 0x1E376C08U);
+    VANITY_SHA_R(50, 0x2748774CU); VANITY_SHA_R(51, 0x34B0BCB5U);
+    VANITY_SHA_R(52, 0x391C0CB3U); VANITY_SHA_R(53, 0x4ED8AA4AU);
+    VANITY_SHA_R(54, 0x5B9CCA4FU); VANITY_SHA_R(55, 0x682E6FF3U);
+    VANITY_SHA_R(56, 0x748F82EEU); VANITY_SHA_R(57, 0x78A5636FU);
+    VANITY_SHA_R(58, 0x84C87814U); VANITY_SHA_R(59, 0x8CC70208U);
+    VANITY_SHA_R(60, 0x90BEFFFAU); VANITY_SHA_R(61, 0xA4506CEBU);
+    VANITY_SHA_R(62, 0xBEF9A3F7U); VANITY_SHA_R(63, 0xC67178F2U);
+
+#undef VANITY_SHA_R
+
+    state[0] += a;
+    state[1] += b;
+    state[2] += c;
+    state[3] += d;
+    state[4] += e;
+    state[5] += f;
+    state[6] += g;
+    state[7] += h;
+}
+
 __device__ void cuda_sha256_init(CUDA_SHA256_CTX *ctx)
 {
     ctx->datalen = 0;

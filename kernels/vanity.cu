@@ -72,7 +72,7 @@ static __device__ __forceinline__ void vanity_build_b1(const BYTE *owner, BYTE b
 static __device__ __forceinline__ void vanity_pubkey_sha256(const BYTE *base,
                                                               const BYTE *seed16,
                                                               const BYTE *owner,
-                                                              const BYTE *b1,
+                                                              const WORD *W1,
                                                               BYTE out[32])
 {
     CUDA_SHA256_CTX ctx;
@@ -82,7 +82,7 @@ static __device__ __forceinline__ void vanity_pubkey_sha256(const BYTE *base,
     memcpy(b0 + 32, seed16, 16);
     memcpy(b0 + 48, owner, 16);
     cuda_sha256_transform(&ctx, b0);
-    cuda_sha256_transform(&ctx, b1);
+    cuda_sha256_transform_w(ctx.state, W1);
     vanity_emit_sha256_digest(&ctx, out);
 }
 
@@ -277,9 +277,15 @@ vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
     lw[2] += k;
     lw[3] += k;
 
-    /* loop-invariant SHA-256 padding block */
-    BYTE sha_block1[64];
-    vanity_build_b1(owner, sha_block1);
+    /* loop-invariant SHA-256 block-1 message schedule (depends only on
+       owner). precompute W once, skip 16 byte-swaps + 48 SIG/add ops in
+       every iteration. */
+    WORD sha_W1[64];
+    {
+        BYTE sha_block1[64];
+        vanity_build_b1(owner, sha_block1);
+        cuda_sha256_expand_w(sha_block1, sha_W1);
+    }
 
     unsigned long long start_clock = clock64();
     uint32_t watchdog = 1u;
@@ -307,7 +313,7 @@ vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
             create_account_seed[b] = glyph_from_hash_byte[local_out[b]];
         }
 
-        vanity_pubkey_sha256(base, create_account_seed, owner, sha_block1, local_out);
+        vanity_pubkey_sha256(base, create_account_seed, owner, sha_W1, local_out);
 
         if (fd_base58_check_match_32(local_out, target, target_len, suffix, suffix_len))
         {
