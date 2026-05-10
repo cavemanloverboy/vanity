@@ -72,17 +72,10 @@ static __device__ __forceinline__ void vanity_pubkey_sha256(const BYTE *base,
     memset(b1, 0, sizeof(b1));
     memcpy(b1, owner + 16, 16);
     b1[16] = (BYTE)0x80;
-    {
-        unsigned long long const bl = 80ULL * 8ULL;
-        b1[63] = (BYTE)(bl);
-        b1[62] = (BYTE)(bl >> 8);
-        b1[61] = (BYTE)(bl >> 16);
-        b1[60] = (BYTE)(bl >> 24);
-        b1[59] = (BYTE)(bl >> 32);
-        b1[58] = (BYTE)(bl >> 40);
-        b1[57] = (BYTE)(bl >> 48);
-        b1[56] = (BYTE)(bl >> 56);
-    }
+    /* bit length = 80 * 8 = 640 = 0x280, big-endian in [56..63]; only the
+       low two bytes are non-zero. the other 6 bytes stay 0 from memset. */
+    b1[62] = (BYTE)0x02;
+    b1[63] = (BYTE)0x80;
     cuda_sha256_transform(&ctx, b1);
     vanity_emit_sha256_digest(&ctx, out);
 }
