@@ -288,7 +288,7 @@ vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
     {
         if (--watchdog == 0)
         {
-            watchdog = 100u;
+            watchdog = 10000u;
             if (atomicMax(&done, 0) == 1)
             {
                 atomicAdd(&count, iter);
