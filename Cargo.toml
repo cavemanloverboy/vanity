@@ -10,7 +10,13 @@ license = "MIT OR Apache-2.0"
 description = "A *bLaZinGlY fAsT* tool for grinding vanity addresses on Solana"
 
 [features]
+# CUDA backend (requires nvcc on the build machine). Historical default GPU
+# backend; `cargo install vanity --features=gpu` keeps building CUDA.
 gpu = ["cc"]
+# OpenCL backend, for machines without CUDA. Reuses every `gpu` code path in
+# main.rs (same extern "C" ABI) but build.rs compiles the OpenCL C host and
+# kernels instead of the .cu files. Build with `--features=opencl`.
+opencl = ["gpu"]
 deploy = ["solana-rpc-client", "solana-sdk"]
 default = []
 

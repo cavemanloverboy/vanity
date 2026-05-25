@@ -239,3 +239,203 @@ static __device__ bool kp_matches_target(
     }
     return true;
 }
+
+// ─── doppler ──────────────────────────────────────────────────────────────
+//
+// Shares this translation unit's ed25519 machinery (fe/ge/sha512). Matches a
+// pubkey when at least dop_required of its four 8-byte segments are sign-
+// extendable 32-bit values: low 4 bytes are an i32 and high 4 bytes are its
+// sign extension (all 0x00 if bit 31 clear, all 0xFF if set). No base58.
+
+__device__ static int dop_done = 0;
+__device__ static unsigned long long dop_count = 0;
+__device__ static uint32_t dop_required = 1;
+
+static __global__ void __launch_bounds__(KP_MAX_THREADS)
+vanity_doppler_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles);
+
+static __device__ __forceinline__ uint32_t doppler_count(const unsigned char *pk)
+{
+    uint32_t matched = 0;
+    #pragma unroll
+    for (int s = 0; s < 4; ++s) {
+        int o = s * 8;
+        unsigned char fill = (pk[o + 3] & 0x80) ? 0xFF : 0x00;
+        if (pk[o + 4] == fill && pk[o + 5] == fill &&
+            pk[o + 6] == fill && pk[o + 7] == fill)
+            matched++;
+    }
+    return matched;
+}
+
+typedef struct {
+    int device_id;
+    cudaStream_t stream;
+    uint8_t *d_buffer;
+    int num_blocks;
+    int num_threads;
+    unsigned long long target_cycles;
+    uint64_t out_offset;
+} GpuDopplerCtx;
+
+extern "C" void* gpu_doppler_init(int id, uint32_t required_segments)
+{
+    cudaSetDevice(id);
+
+    cudaDeviceProp prop;
+    cudaError_t err = cudaGetDeviceProperties(&prop, id);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "gpu_doppler_init(%d): cudaGetDeviceProperties: %s\n", id, cudaGetErrorString(err));
+        exit(EXIT_FAILURE);
+    }
+
+    int nthreads = KP_MAX_THREADS;
+    int blocks_per_sm = prop.maxThreadsPerMultiProcessor / nthreads;
+    int nblocks = blocks_per_sm * prop.multiProcessorCount;
+
+    int clock_khz = 0;
+    if (cudaDeviceGetAttribute(&clock_khz, cudaDevAttrClockRate, id) != cudaSuccess || clock_khz <= 0) {
+        fprintf(stderr, "gpu_doppler_init(%d): clock rate query failed\n", id);
+        exit(EXIT_FAILURE);
+    }
+
+    GpuDopplerCtx *ctx = (GpuDopplerCtx *)malloc(sizeof(GpuDopplerCtx));
+    ctx->device_id   = id;
+    ctx->num_blocks  = nblocks;
+    ctx->num_threads = nthreads;
+    ctx->target_cycles = (unsigned long long)clock_khz * 1000ULL * 5ULL;
+
+    cudaStreamCreate(&ctx->stream);
+
+    // Buffer: [seed:32] [out:32]
+    uint64_t buf_size = 32 + 32;
+    ctx->out_offset = 32;
+
+    err = cudaMalloc((void**)&ctx->d_buffer, buf_size);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "gpu_doppler_init(%d): cudaMalloc: %s\n", id, cudaGetErrorString(err));
+        exit(EXIT_FAILURE);
+    }
+
+    cudaMemcpyToSymbol(dop_required, &required_segments, sizeof(uint32_t), 0, cudaMemcpyHostToDevice);
+
+    return (void *)ctx;
+}
+
+extern "C" void gpu_doppler_launch(void *opaque, uint8_t *seed)
+{
+    GpuDopplerCtx *ctx = (GpuDopplerCtx *)opaque;
+    cudaSetDevice(ctx->device_id);
+
+    cudaMemcpy(ctx->d_buffer, seed, 32, cudaMemcpyHostToDevice);
+
+    int zero = 0;
+    unsigned long long zero_ull = 0;
+    cudaMemcpyToSymbol(dop_done, &zero, sizeof(int));
+    cudaMemcpyToSymbol(dop_count, &zero_ull, sizeof(unsigned long long));
+
+    vanity_doppler_search<<<ctx->num_blocks, ctx->num_threads, 0, ctx->stream>>>(
+        ctx->d_buffer,
+        (uint64_t)ctx->num_blocks * ctx->num_threads,
+        ctx->target_cycles);
+}
+
+extern "C" int gpu_doppler_query(void *opaque)
+{
+    GpuDopplerCtx *ctx = (GpuDopplerCtx *)opaque;
+    cudaSetDevice(ctx->device_id);
+    return cudaStreamQuery(ctx->stream) == cudaSuccess ? 1 : 0;
+}
+
+// out layout written by caller: [seed:32] [count:8]
+extern "C" void gpu_doppler_read(void *opaque, uint8_t *out)
+{
+    GpuDopplerCtx *ctx = (GpuDopplerCtx *)opaque;
+    cudaSetDevice(ctx->device_id);
+    cudaMemcpy(out, ctx->d_buffer + ctx->out_offset, 32, cudaMemcpyDeviceToHost);
+    cudaMemcpyFromSymbol(out + 32, dop_count, 8, 0, cudaMemcpyDeviceToHost);
+}
+
+extern "C" void gpu_doppler_destroy(void *opaque)
+{
+    GpuDopplerCtx *ctx = (GpuDopplerCtx *)opaque;
+    cudaSetDevice(ctx->device_id);
+    cudaStreamSynchronize(ctx->stream);
+    cudaStreamDestroy(ctx->stream);
+    cudaFree(ctx->d_buffer);
+    free(ctx);
+}
+
+static __global__ void __launch_bounds__(KP_MAX_THREADS)
+vanity_doppler_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
+{
+    uint8_t *host_seed = buffer;
+    uint8_t *out = buffer + 32;
+
+    uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+    unsigned char seed[32];
+    unsigned char privatek[64];
+    unsigned char pubkey[32];
+    ge_p3 A;
+
+    CUDA_SHA256_CTX sha256_ctx;
+    cuda_sha256_init(&sha256_ctx);
+    cuda_sha256_update(&sha256_ctx, (BYTE *)host_seed, 32);
+    cuda_sha256_update(&sha256_ctx, (BYTE *)(&idx), 8);
+    cuda_sha256_final(&sha256_ctx, (BYTE *)seed);
+
+    unsigned long long start_clock = clock64();
+
+    for (uint64_t iter = 0; iter < uint64_t(1000) * 1000 * 1000 * 1000; iter++)
+    {
+        if (iter % 100 == 0) {
+            if (atomicMax(&dop_done, 0) == 1) {
+                atomicAdd(&dop_count, iter);
+                return;
+            }
+            if (clock64() - start_clock >= max_cycles) {
+                atomicAdd(&dop_count, iter);
+                return;
+            }
+        }
+
+        sha512_context md;
+        md.curlen = 0;
+        md.length = 0;
+        md.state[0] = UINT64_C(0x6a09e667f3bcc908);
+        md.state[1] = UINT64_C(0xbb67ae8584caa73b);
+        md.state[2] = UINT64_C(0x3c6ef372fe94f82b);
+        md.state[3] = UINT64_C(0xa54ff53a5f1d36f1);
+        md.state[4] = UINT64_C(0x510e527fade682d1);
+        md.state[5] = UINT64_C(0x9b05688c2b3e6c1f);
+        md.state[6] = UINT64_C(0x1f83d9abfb41bd6b);
+        md.state[7] = UINT64_C(0x5be0cd19137e2179);
+
+        #pragma unroll
+        for (int i = 0; i < 32; i++) {
+            md.buf[i] = seed[i];
+        }
+        md.curlen = 32;
+
+        sha512_final(&md, privatek);
+
+        privatek[0]  &= 248;
+        privatek[31] &= 63;
+        privatek[31] |= 64;
+
+        ge_scalarmult_base(&A, privatek);
+        ge_p3_tobytes(pubkey, &A);
+
+        if (doppler_count(pubkey) >= dop_required)
+        {
+            if (atomicMax(&dop_done, 1) == 0) {
+                memcpy(out, seed, 32);
+            }
+            atomicAdd(&dop_count, iter + 1);
+            return;
+        }
+
+        memcpy(seed, privatek + 32, 32);
+    }
+}
