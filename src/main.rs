@@ -38,6 +38,7 @@ use std::{
 pub enum Command {
     Grind(GrindArgs),
     GrindKeypair(GrindKeypairArgs),
+    GrindDoppler(DopplerArgs),
     Verify(VerifyArgs),
     #[cfg(feature = "deploy")]
     Deploy(DeployArgs),
@@ -91,6 +92,27 @@ pub struct GrindKeypairArgs {
     /// Whether user cares about the case of the pubkey
     #[clap(long, default_value_t = false)]
     pub case_insensitive: bool,
+
+    /// Number of gpus to use for mining
+    #[clap(long, default_value_t = 1)]
+    #[cfg(feature = "gpu")]
+    pub num_gpus: u32,
+
+    /// Number of cpu threads to use for mining
+    #[clap(long, default_value_t = 0)]
+    pub num_cpus: u32,
+
+    /// Number of matching keypairs to find before stopping
+    #[clap(long, default_value_t = 1)]
+    pub count: u32,
+}
+
+#[derive(Debug, Parser)]
+pub struct DopplerArgs {
+    /// How many of the four 8-byte pubkey segments must be sign-extendable
+    /// 32-bit values (1-4). Higher is exponentially rarer.
+    #[clap(long, default_value_t = 1)]
+    pub segments: u8,
 
     /// Number of gpus to use for mining
     #[clap(long, default_value_t = 1)]
@@ -326,6 +348,7 @@ fn main() {
     match command {
         Command::Grind(args) => grind(args),
         Command::GrindKeypair(args) => grind_keypair(args),
+        Command::GrindDoppler(args) => grind_doppler(args),
         Command::Verify(args) => verify(args),
         #[cfg(feature = "deploy")]
         Command::Deploy(args) => deploy(args),
@@ -838,7 +861,263 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
     );
 }
 
+// ─── doppler ──────────────────────────────────────────────────────────────
+
+fn grind_doppler(mut args: DopplerArgs) {
+    maybe_update_num_cpus(&mut args.num_cpus);
+    assert!(
+        (1..=4).contains(&args.segments),
+        "--segments must be between 1 and 4"
+    );
+
+    let prob = doppler_probability(args.segments);
+    let expected = if prob > 0.0 { 1.0 / prob } else { f64::INFINITY };
+
+    #[cfg(feature = "gpu")]
+    eprintln!("using {} cpus, {} gpus", args.num_cpus, args.num_gpus);
+    #[cfg(not(feature = "gpu"))]
+    eprintln!("using {} cpus", args.num_cpus);
+    eprintln!(
+        "doppler: >= {} sign-extendable 32-bit segment(s) | probability: {:.6e} | expected: {} attempts",
+        args.segments,
+        prob,
+        (expected as u64).to_formatted_string(&Locale::en)
+    );
+
+    let target_count = args.count;
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    #[cfg(feature = "gpu")]
+    let gpu_thread = if args.num_gpus > 0 {
+        let num_gpus = args.num_gpus;
+        let segments = args.segments as u32;
+        Some(
+            thread::Builder::new()
+                .name("gpu_mgr".into())
+                .spawn(move || {
+                    let mut contexts = Vec::with_capacity(num_gpus as usize);
+                    for id in 0..num_gpus {
+                        let ctx = unsafe { gpu_doppler_init(id as i32, segments) };
+                        contexts.push(ctx);
+                    }
+
+                    let mut iterations = vec![0u64; num_gpus as usize];
+                    let mut launch_times = vec![Instant::now(); num_gpus as usize];
+                    let mut in_flight = vec![false; num_gpus as usize];
+
+                    for (i, &ctx) in contexts.iter().enumerate() {
+                        let seed = new_gpu_seed(i as u32, 0);
+                        launch_times[i] = Instant::now();
+                        unsafe { gpu_doppler_launch(ctx, seed.as_ptr()); }
+                        in_flight[i] = true;
+                    }
+
+                    loop {
+                        if done(target_count) { break; }
+
+                        let mut any_ready = false;
+                        for (i, &ctx) in contexts.iter().enumerate() {
+                            if !in_flight[i] { continue; }
+                            if unsafe { gpu_doppler_query(ctx) } == 0 { continue; }
+                            any_ready = true;
+
+                            let time_sec = launch_times[i].elapsed().as_secs_f64();
+                            let mut out = [0u8; 40];
+                            unsafe { gpu_doppler_read(ctx, out.as_mut_ptr()); }
+
+                            let found_seed: [u8; 32] = out[..32].try_into().unwrap();
+                            let signing_key = SigningKey::from_bytes(&found_seed);
+                            let pubkey_bytes = signing_key.verifying_key().to_bytes();
+                            let count = u64::from_le_bytes(array::from_fn(|j| out[32 + j]));
+
+                            TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
+
+                            if doppler_count_segments(&pubkey_bytes) >= segments {
+                                let pubkey_str = fd_bs58::encode_32(pubkey_bytes);
+                                eprintln!(
+                                    "\r\x1b[Kgpu {} match: {} in {:.3}s",
+                                    i, &pubkey_str, time_sec
+                                );
+                                print_doppler_result(&found_seed, &pubkey_bytes, &pubkey_str);
+                                FOUND.fetch_add(1, Ordering::SeqCst);
+                            }
+
+                            in_flight[i] = false;
+                            if !done(target_count) {
+                                iterations[i] += 1;
+                                let seed = new_gpu_seed(i as u32, iterations[i]);
+                                launch_times[i] = Instant::now();
+                                unsafe { gpu_doppler_launch(ctx, seed.as_ptr()); }
+                                in_flight[i] = true;
+                            }
+                        }
+
+                        if !any_ready {
+                            thread::sleep(Duration::from_millis(10));
+                        }
+                    }
+
+                    for (i, &ctx) in contexts.iter().enumerate() {
+                        if in_flight[i] {
+                            while unsafe { gpu_doppler_query(ctx) } == 0 {
+                                thread::sleep(Duration::from_millis(10));
+                            }
+                            let mut out = [0u8; 40];
+                            unsafe { gpu_doppler_read(ctx, out.as_mut_ptr()); }
+                            let count = u64::from_le_bytes(array::from_fn(|j| out[32 + j]));
+                            TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
+                        }
+                    }
+                    for ctx in contexts {
+                        unsafe { gpu_doppler_destroy(ctx); }
+                    }
+                })
+                .unwrap(),
+        )
+    } else {
+        None
+    };
+
+    let grind_start = Instant::now();
+    let reporter = spawn_hashrate_reporter(Arc::clone(&shutdown), expected, grind_start);
+
+    let segments = args.segments as u32;
+    (0..args.num_cpus).into_par_iter().for_each(|i| {
+        let timer = Instant::now();
+        let mut local_batch = 0_u64;
+
+        loop {
+            if done(target_count) {
+                if local_batch > 0 {
+                    TOTAL_ATTEMPTS.fetch_add(local_batch, Ordering::Relaxed);
+                }
+                return;
+            }
+
+            let seed: [u8; 32] = rand::random();
+            let signing_key = SigningKey::from_bytes(&seed);
+            let pubkey_bytes = signing_key.verifying_key().to_bytes();
+
+            local_batch += 1;
+            if local_batch >= 4096 {
+                TOTAL_ATTEMPTS.fetch_add(4096, Ordering::Relaxed);
+                local_batch -= 4096;
+            }
+
+            if doppler_count_segments(&pubkey_bytes) >= segments {
+                if local_batch > 0 {
+                    TOTAL_ATTEMPTS.fetch_add(local_batch, Ordering::Relaxed);
+                    local_batch = 0;
+                }
+                let pubkey_str = fd_bs58::encode_32(pubkey_bytes);
+                let time_secs = timer.elapsed().as_secs_f64();
+                let elapsed_global = grind_start.elapsed().as_secs_f64().max(1e-9);
+                let total = TOTAL_ATTEMPTS.load(Ordering::Relaxed);
+                let global_rate = total as f64 / elapsed_global;
+                eprintln!(
+                    "\r\x1b[Kcpu {i} match: {pubkey_str} in {:.3}s; {} attempts/sec",
+                    time_secs,
+                    (global_rate as u64).to_formatted_string(&Locale::en)
+                );
+                print_doppler_result(&seed, &pubkey_bytes, &pubkey_str);
+                FOUND.fetch_add(1, Ordering::SeqCst);
+                if done(target_count) {
+                    break;
+                }
+            }
+        }
+    });
+
+    #[cfg(feature = "gpu")]
+    if let Some(t) = gpu_thread {
+        t.join().unwrap();
+    }
+
+    shutdown.store(true, Ordering::SeqCst);
+    reporter.join().unwrap();
+
+    let total = TOTAL_ATTEMPTS.load(Ordering::Relaxed);
+    let elapsed = grind_start.elapsed().as_secs_f64().max(1e-9);
+    let rate = total as f64 / elapsed;
+    eprintln!(
+        "\r\x1b[Kdone: {} attempts in {} at {} attempts/sec",
+        total.to_formatted_string(&Locale::en),
+        format_duration(elapsed),
+        (rate as u64).to_formatted_string(&Locale::en)
+    );
+}
+
 // ─── helpers ────────────────────────────────────────────────────────────────
+
+/// Count how many of the four 8-byte pubkey segments are sign-extendable
+/// 32-bit values: low 4 bytes are an i32, high 4 bytes are its sign extension.
+fn doppler_count_segments(pubkey: &[u8; 32]) -> u32 {
+    let mut matched = 0;
+    for s in 0..4 {
+        let o = s * 8;
+        let fill = if pubkey[o + 3] & 0x80 != 0 { 0xFF } else { 0x00 };
+        if pubkey[o + 4] == fill
+            && pubkey[o + 5] == fill
+            && pubkey[o + 6] == fill
+            && pubkey[o + 7] == fill
+        {
+            matched += 1;
+        }
+    }
+    matched
+}
+
+/// Probability that a uniformly random pubkey has at least `required` of its
+/// four segments sign-extendable. Each segment matches with p = 2^-32 (2^32
+/// of the 2^64 byte patterns), so this is a binomial tail over 4 trials.
+fn doppler_probability(required: u8) -> f64 {
+    let p = 2f64.powi(-32);
+    let q = 1.0 - p;
+    const BINOM4: [f64; 5] = [1.0, 4.0, 6.0, 4.0, 1.0]; // C(4, k)
+    let mut total = 0.0;
+    for k in (required as u32)..=4 {
+        total += BINOM4[k as usize] * p.powi(k as i32) * q.powi((4 - k) as i32);
+    }
+    total
+}
+
+/// Print the matched keypair plus a per-segment breakdown, including the
+/// assembly `.equ` constants the doppler-keygen reference emits.
+fn print_doppler_result(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
+    print_keypair_result(seed, pubkey, pubkey_str);
+    eprintln!(
+        "doppler: {}/4 sign-extendable segment(s)",
+        doppler_count_segments(pubkey)
+    );
+    for s in 0..4usize {
+        let o = s * 8;
+        let fill = if pubkey[o + 3] & 0x80 != 0 { 0xFF } else { 0x00 };
+        let sign_extendable = pubkey[o + 4] == fill
+            && pubkey[o + 5] == fill
+            && pubkey[o + 6] == fill
+            && pubkey[o + 7] == fill;
+        if sign_extendable {
+            let imm = i32::from_le_bytes([pubkey[o], pubkey[o + 1], pubkey[o + 2], pubkey[o + 3]]);
+            eprintln!(
+                "  seg {s} (bytes {}-{}): imm32 {} (0x{:08x})  =>  .equ EXPECTED_KEY_{s}, 0x{:08x}",
+                o,
+                o + 7,
+                imm,
+                imm as u32,
+                imm as u32
+            );
+        } else {
+            let full = u64::from_le_bytes(array::from_fn(|j| pubkey[o + j]));
+            eprintln!(
+                "  seg {s} (bytes {}-{}): 0x{:016x} (not sign-extendable)  =>  .equ EXPECTED_KEY_{s}, 0x{:016x}",
+                o,
+                o + 7,
+                full,
+                full
+            );
+        }
+    }
+}
 
 fn format_target_label(prefix: &str, suffix: &str) -> String {
     match (prefix.is_empty(), suffix.is_empty()) {
@@ -940,6 +1219,12 @@ extern "C" {
     pub fn gpu_keypair_query(ctx: *mut std::ffi::c_void) -> i32;
     pub fn gpu_keypair_read(ctx: *mut std::ffi::c_void, out: *mut u8);
     pub fn gpu_keypair_destroy(ctx: *mut std::ffi::c_void);
+
+    pub fn gpu_doppler_init(id: i32, required_segments: u32) -> *mut std::ffi::c_void;
+    pub fn gpu_doppler_launch(ctx: *mut std::ffi::c_void, seed: *const u8);
+    pub fn gpu_doppler_query(ctx: *mut std::ffi::c_void) -> i32;
+    pub fn gpu_doppler_read(ctx: *mut std::ffi::c_void, out: *mut u8);
+    pub fn gpu_doppler_destroy(ctx: *mut std::ffi::c_void);
 }
 
 #[cfg(feature = "gpu")]
