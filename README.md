@@ -184,6 +184,15 @@ yes
 
 ## Performance
 
+Approximate single-device throughput:
+
+| Backend | Device | seeds/s | keypairs/s |
+| --- | --- | --- | --- |
+| CUDA   | RTX 4090   | ~1.25 B | ~65 M  |
+| OpenCL | M3 Max     | ~315 M  | ~9.5 M |
+
+`grind` is far faster because each attempt is just a SHA-256 hash. Keypair modes (`grind-keypair`/`grind-doppler`) perform full sha512 and ed25519 scalar multiplication per attempt. Throughput scales roughly linearly with `--num-gpus`.
+
 **Update@06/27/25:** Ran a 14x RTX 4090 setup and it did 1.2-1.3 billion searches per second per GPU
 
 ## Acknowledgements, External Libraries
