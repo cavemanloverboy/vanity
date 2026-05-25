@@ -306,6 +306,16 @@ extern "C" void gpu_grind_launch(void *opaque, uint8_t *seed)
         ctx->d_buffer,
         (uint64_t)ctx->num_blocks * ctx->num_threads,
         ctx->target_cycles);
+
+    cudaError_t launch_err = cudaGetLastError();
+    if (launch_err != cudaSuccess) {
+        fprintf(stderr,
+                "gpu_grind_launch: kernel launch failed: %s\n"
+                "  if this is 'no kernel image is available', rebuild with your GPU's\n"
+                "  compute capability, e.g. VANITY_CUDA_ARCH=86 for an RTX 3090.\n",
+                cudaGetErrorString(launch_err));
+        exit(EXIT_FAILURE);
+    }
 }
 
 extern "C" int gpu_grind_query(void *opaque)

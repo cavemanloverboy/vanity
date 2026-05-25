@@ -2,7 +2,7 @@
 
 A *bLaZinGlY fAsT* tool for grinding vanity addresses on Solana.
 
-## What
+## 1) What
 
 Typically, solana developers wishing to obtain a vanity address for their program or token grind out ed25519 keypairs and sign off on a `SystemInstruction::CreateAccount` instruction. However, by using `SystemInstruction::CreateAccountWithSeed`, developers can bypass ed25519 and get extreme speedups on address searches. Although not as generic, this method covers many use cases.
 
@@ -19,6 +19,13 @@ To compile for an NVIDIA gpu (CUDA) — requires the CUDA toolkit (`nvcc`) on th
 ```bash
 cargo install vanity --features=gpu
 ```
+
+By default the CUDA build emits code for several architectures (Turing through Ada) plus a PTX fallback. For a faster, targeted build set `VANITY_CUDA_ARCH` to your GPU's compute capability — e.g. `86` for an RTX 3090, `89` for an RTX 4090, `80` for an A100, `90` for an H100:
+
+```bash
+VANITY_CUDA_ARCH=86 cargo install vanity --features=gpu
+```
+If a launch prints `no kernel image is available for execution on the device`, the binary was built without your GPU's architecture — rebuild with the right `VANITY_CUDA_ARCH`.
 
 On machines without CUDA (AMD / Intel / Apple GPUs, or no NVIDIA driver), build the OpenCL backend instead:
 
