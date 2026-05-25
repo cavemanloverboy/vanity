@@ -27,6 +27,7 @@ codegen-units = 1
 
 [dependencies]
 clap = { version = "4.5.7", features = ["derive"] }
+ctrlc = "3.4"
 ed25519-dalek = "2"
 fd_bs58 = "0.1.0"
 num-bigint = "0.4"

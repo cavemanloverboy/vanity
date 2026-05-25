@@ -10,8 +10,10 @@ fn main() {
 #[cfg(all(feature = "gpu", not(feature = "opencl")))]
 fn build_cuda_libs() {
     println!("cargo::rerun-if-changed=kernels/");
+    println!("cargo::rerun-if-env-changed=VANITY_CUDA_ARCH");
 
-    cc::Build::new()
+    let mut build = cc::Build::new();
+    build
         .cuda(true)
         .include("kernels")
         .file("kernels/utils.cu")
@@ -19,10 +21,31 @@ fn build_cuda_libs() {
         .file("kernels/vanity_keypair.cu")
         .file("kernels/base58.cu")
         .file("kernels/sha256.cu")
-        .flag("-cudart=static")
-        .flag("-gencode=arch=compute_89,code=sm_89")
-        .flag("-gencode=arch=compute_89,code=compute_89")
-        .compile("libvanity.a");
+        .flag("-cudart=static");
+
+    // Which GPU architectures to generate code for. A cubin built for one
+    // compute capability only runs on that capability (e.g. an sm_89 cubin
+    // will NOT load on an sm_86 RTX 3090), and PTX only JITs *upward*, so a
+    // single high target silently fails to launch on older cards. Default to
+    // native SASS for the common Turing..Ada cards plus a PTX fallback for
+    // anything newer; override with VANITY_CUDA_ARCH for a faster, targeted
+    // build, e.g. `VANITY_CUDA_ARCH=86` (RTX 3090) or `VANITY_CUDA_ARCH=80,89`.
+    match std::env::var("VANITY_CUDA_ARCH") {
+        Ok(spec) if !spec.trim().is_empty() => {
+            for arch in spec.split([';', ',']).map(str::trim).filter(|s| !s.is_empty()) {
+                build.flag(&format!("-gencode=arch=compute_{arch},code=sm_{arch}"));
+            }
+        }
+        _ => {
+            for arch in ["75", "80", "86", "89"] {
+                build.flag(&format!("-gencode=arch=compute_{arch},code=sm_{arch}"));
+            }
+            // PTX fallback so newer GPUs (e.g. sm_90 H100) still JIT-load.
+            build.flag("-gencode=arch=compute_89,code=compute_89");
+        }
+    }
+
+    build.compile("libvanity.a");
 
     // Add link directory
     println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64");

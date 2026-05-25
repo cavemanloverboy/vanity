@@ -183,9 +183,14 @@ pub struct DeployArgs {
 
 static FOUND: AtomicU32 = AtomicU32::new(0);
 static TOTAL_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+/// Set by the Ctrl-C handler; makes every grind loop wind down. Needed
+/// because with no explicit handler, SIGINT relies on the kernel's default
+/// terminate action — which does not apply when the process is PID 1 in a
+/// container (common on GPU cloud hosts), so Ctrl-C would otherwise be ignored.
+static ABORTED: AtomicBool = AtomicBool::new(false);
 
 fn done(target: u32) -> bool {
-    FOUND.load(Ordering::SeqCst) >= target
+    FOUND.load(Ordering::SeqCst) >= target || ABORTED.load(Ordering::SeqCst)
 }
 
 // ─── bs58 probability (from cavemanloverboy/bs58p) ──────────────────────────
@@ -343,6 +348,17 @@ fn spawn_hashrate_reporter(
 
 fn main() {
     rayon::ThreadPoolBuilder::new().build_global().unwrap();
+
+    // Explicit Ctrl-C handler. First press winds the grind down cleanly (so
+    // the final stats print and GPU contexts are released); a second press
+    // forces an immediate exit. Without this, SIGINT is ignored when the
+    // process is PID 1 in a container (e.g. GPU cloud hosts).
+    let _ = ctrlc::set_handler(|| {
+        if ABORTED.swap(true, Ordering::SeqCst) {
+            std::process::exit(130);
+        }
+        eprintln!("\naborting… (press Ctrl-C again to force-quit)");
+    });
 
     let command = Command::parse();
     match command {
