@@ -329,7 +329,7 @@ int gpu_grind_query(void *opaque) {
     return status == CL_COMPLETE ? 1 : 0;
 }
 
-/* out: [seed16:16][count:8] */
+/* out: [seed16:16][count:8][done:1] */
 void gpu_grind_read(void *opaque, uint8_t *out) {
     GrindCtx *c = (GrindCtx *)opaque;
     clWaitForEvents(1, &c->event);
@@ -341,6 +341,7 @@ void gpu_grind_read(void *opaque, uint8_t *out) {
     uint64_t total = 0;
     for (size_t i = 0; i < c->global; ++i) total += c->counts_host[i];
     memcpy(out + 16, &total, 8);
+    CK(clEnqueueReadBuffer(c->queue, c->done, CL_TRUE, 0, 1, out + 24, 0, NULL, NULL), "read done");
 
     clReleaseEvent(c->event);
     c->in_flight = 0;

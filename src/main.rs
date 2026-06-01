@@ -327,20 +327,18 @@ fn spawn_hashrate_reporter(
     expected: f64,
     start: Instant,
 ) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        loop {
-            if shutdown.load(Ordering::SeqCst) {
-                break;
-            }
-            thread::sleep(Duration::from_secs(1));
-            if shutdown.load(Ordering::SeqCst) {
-                break;
-            }
-            let elapsed = start.elapsed().as_secs_f64();
-            let total = TOTAL_ATTEMPTS.load(Ordering::Relaxed);
-            let rate = total as f64 / elapsed.max(1e-9);
-            print_status(total, rate, elapsed, expected);
+    thread::spawn(move || loop {
+        if shutdown.load(Ordering::SeqCst) {
+            break;
         }
+        thread::sleep(Duration::from_secs(1));
+        if shutdown.load(Ordering::SeqCst) {
+            break;
+        }
+        let elapsed = start.elapsed().as_secs_f64();
+        let total = TOTAL_ATTEMPTS.load(Ordering::Relaxed);
+        let rate = total as f64 / elapsed.max(1e-9);
+        print_status(total, rate, elapsed, expected);
     })
 }
 
@@ -391,8 +389,7 @@ fn deploy(args: DeployArgs) {
         .unwrap_or(base_keypair.insecure_clone());
     let authority = args.authority.unwrap_or_else(|| payer_keypair.pubkey());
 
-    let target =
-        Pubkey::create_with_seed(&base_keypair.pubkey(), &args.seed, &args.owner).unwrap();
+    let target = Pubkey::create_with_seed(&base_keypair.pubkey(), &args.seed, &args.owner).unwrap();
     let rpc_client = RpcClient::new(args.rpc);
     let buffer_len = rpc_client.get_account_data(&args.buffer).unwrap().len();
     let rent = rpc_client
@@ -483,7 +480,9 @@ fn grind(mut args: GrindArgs) {
     let target_label = format_target_label(prefix, suffix);
     eprintln!(
         "target: {} | probability: {:.6e} | expected: {} attempts",
-        target_label, prob, (expected as u64).to_formatted_string(&Locale::en)
+        target_label,
+        prob,
+        (expected as u64).to_formatted_string(&Locale::en)
     );
 
     let target_count = args.count;
@@ -523,46 +522,60 @@ fn grind(mut args: GrindArgs) {
                     for (i, &ctx) in contexts.iter().enumerate() {
                         let seed = new_gpu_seed(i as u32, 0);
                         launch_times[i] = Instant::now();
-                        unsafe { gpu_grind_launch(ctx, seed.as_ptr()); }
+                        unsafe {
+                            gpu_grind_launch(ctx, seed.as_ptr());
+                        }
                         in_flight[i] = true;
                     }
 
                     loop {
-                        if done(target_count) { break; }
+                        if done(target_count) {
+                            break;
+                        }
 
                         let mut any_ready = false;
                         for (i, &ctx) in contexts.iter().enumerate() {
-                            if !in_flight[i] { continue; }
-                            if unsafe { gpu_grind_query(ctx) } == 0 { continue; }
+                            if !in_flight[i] {
+                                continue;
+                            }
+                            if unsafe { gpu_grind_query(ctx) } == 0 {
+                                continue;
+                            }
                             any_ready = true;
 
                             let time_sec = launch_times[i].elapsed().as_secs_f64();
-                            let mut out = [0u8; 24];
-                            unsafe { gpu_grind_read(ctx, out.as_mut_ptr()); }
+                            let mut out = [0u8; 25];
+                            unsafe {
+                                gpu_grind_read(ctx, out.as_mut_ptr());
+                            }
 
-                            let reconstructed: [u8; 32] = Sha256::new()
-                                .chain_update(base)
-                                .chain_update(&out[..16])
-                                .chain_update(owner)
-                                .finalize()
-                                .into();
-                            let out_str = fd_bs58::encode_32(reconstructed);
-                            let out_str_check = maybe_bs58_aware_lowercase(&out_str, ci);
                             let count = u64::from_le_bytes(array::from_fn(|j| out[16 + j]));
-
                             TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
 
-                            if out_str_check.starts_with(prefix) && out_str_check.ends_with(suffix)
-                            {
-                                eprintln!(
-                                    "\r\x1b[Kgpu {} match: {} in {:.3}s",
-                                    i, &out_str, time_sec
-                                );
-                                eprintln!(
-                                    "out seed = {out:?} -> {}",
-                                    core::str::from_utf8(&out[..16]).unwrap()
-                                );
-                                FOUND.fetch_add(1, Ordering::SeqCst);
+                            // Last byte is a flag indicating if the seed is valid
+                            if out[24] == 1 {
+                                let reconstructed: [u8; 32] = Sha256::new()
+                                    .chain_update(base)
+                                    .chain_update(&out[..16])
+                                    .chain_update(owner)
+                                    .finalize()
+                                    .into();
+                                let out_str = fd_bs58::encode_32(reconstructed);
+                                let out_str_check = maybe_bs58_aware_lowercase(&out_str, ci);
+
+                                if out_str_check.starts_with(prefix)
+                                    && out_str_check.ends_with(suffix)
+                                {
+                                    eprintln!(
+                                        "\r\x1b[Kgpu {} match: {} in {:.3}s",
+                                        i, &out_str, time_sec
+                                    );
+                                    eprintln!(
+                                        "out seed = {out:?} -> {}",
+                                        core::str::from_utf8(&out[..16]).unwrap()
+                                    );
+                                    FOUND.fetch_add(1, Ordering::SeqCst);
+                                }
                             }
 
                             in_flight[i] = false;
@@ -570,7 +583,9 @@ fn grind(mut args: GrindArgs) {
                                 iterations[i] += 1;
                                 let seed = new_gpu_seed(i as u32, iterations[i]);
                                 launch_times[i] = Instant::now();
-                                unsafe { gpu_grind_launch(ctx, seed.as_ptr()); }
+                                unsafe {
+                                    gpu_grind_launch(ctx, seed.as_ptr());
+                                }
                                 in_flight[i] = true;
                             }
                         }
@@ -585,14 +600,18 @@ fn grind(mut args: GrindArgs) {
                             while unsafe { gpu_grind_query(ctx) } == 0 {
                                 thread::sleep(Duration::from_millis(10));
                             }
-                            let mut out = [0u8; 24];
-                            unsafe { gpu_grind_read(ctx, out.as_mut_ptr()); }
+                            let mut out = [0u8; 25];
+                            unsafe {
+                                gpu_grind_read(ctx, out.as_mut_ptr());
+                            }
                             let count = u64::from_le_bytes(array::from_fn(|j| out[16 + j]));
                             TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
                         }
                     }
                     for ctx in contexts {
-                        unsafe { gpu_grind_destroy(ctx); }
+                        unsafe {
+                            gpu_grind_destroy(ctx);
+                        }
                     }
                 })
                 .unwrap(),
@@ -602,9 +621,7 @@ fn grind(mut args: GrindArgs) {
     };
 
     let grind_start = Instant::now();
-    let reporter = spawn_hashrate_reporter(
-        Arc::clone(&shutdown), expected, grind_start,
-    );
+    let reporter = spawn_hashrate_reporter(Arc::clone(&shutdown), expected, grind_start);
 
     (0..args.num_cpus).into_par_iter().for_each(|i| {
         let timer = Instant::now();
@@ -621,7 +638,8 @@ fn grind(mut args: GrindArgs) {
 
             let seed: [u8; 16] = rand::random();
             let seed: [u8; 16] = array::from_fn(|i| {
-                const ALNUM: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+                const ALNUM: &[u8] =
+                    b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
                 ALNUM[seed[i] as usize % ALNUM.len()]
             });
 
@@ -639,8 +657,7 @@ fn grind(mut args: GrindArgs) {
                 local_batch -= 4096;
             }
 
-            if matches_target(&pubkey, prefix, suffix, args.case_insensitive)
-            {
+            if matches_target(&pubkey, prefix, suffix, args.case_insensitive) {
                 if local_batch > 0 {
                     TOTAL_ATTEMPTS.fetch_add(local_batch, Ordering::Relaxed);
                     local_batch = 0;
@@ -698,7 +715,9 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
     let target_label = format_target_label(prefix, suffix);
     eprintln!(
         "target: {} | probability: {:.6e} | expected: {} attempts",
-        target_label, prob, (expected as u64).to_formatted_string(&Locale::en)
+        target_label,
+        prob,
+        (expected as u64).to_formatted_string(&Locale::en)
     );
 
     let target_count = args.count;
@@ -734,22 +753,32 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                     for (i, &ctx) in contexts.iter().enumerate() {
                         let seed = new_gpu_seed(i as u32, 0);
                         launch_times[i] = Instant::now();
-                        unsafe { gpu_keypair_launch(ctx, seed.as_ptr()); }
+                        unsafe {
+                            gpu_keypair_launch(ctx, seed.as_ptr());
+                        }
                         in_flight[i] = true;
                     }
 
                     loop {
-                        if done(target_count) { break; }
+                        if done(target_count) {
+                            break;
+                        }
 
                         let mut any_ready = false;
                         for (i, &ctx) in contexts.iter().enumerate() {
-                            if !in_flight[i] { continue; }
-                            if unsafe { gpu_keypair_query(ctx) } == 0 { continue; }
+                            if !in_flight[i] {
+                                continue;
+                            }
+                            if unsafe { gpu_keypair_query(ctx) } == 0 {
+                                continue;
+                            }
                             any_ready = true;
 
                             let time_sec = launch_times[i].elapsed().as_secs_f64();
                             let mut out = [0u8; 40];
-                            unsafe { gpu_keypair_read(ctx, out.as_mut_ptr()); }
+                            unsafe {
+                                gpu_keypair_read(ctx, out.as_mut_ptr());
+                            }
 
                             let found_seed: [u8; 32] = out[..32].try_into().unwrap();
                             let signing_key = SigningKey::from_bytes(&found_seed);
@@ -760,9 +789,7 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
 
                             TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
 
-                            if pubkey_check.starts_with(prefix)
-                                && pubkey_check.ends_with(suffix)
-                            {
+                            if pubkey_check.starts_with(prefix) && pubkey_check.ends_with(suffix) {
                                 eprintln!(
                                     "\r\x1b[Kgpu {} match: {} in {:.3}s",
                                     i, &pubkey_str, time_sec
@@ -776,7 +803,9 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                                 iterations[i] += 1;
                                 let seed = new_gpu_seed(i as u32, iterations[i]);
                                 launch_times[i] = Instant::now();
-                                unsafe { gpu_keypair_launch(ctx, seed.as_ptr()); }
+                                unsafe {
+                                    gpu_keypair_launch(ctx, seed.as_ptr());
+                                }
                                 in_flight[i] = true;
                             }
                         }
@@ -792,13 +821,17 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                                 thread::sleep(Duration::from_millis(10));
                             }
                             let mut out = [0u8; 40];
-                            unsafe { gpu_keypair_read(ctx, out.as_mut_ptr()); }
+                            unsafe {
+                                gpu_keypair_read(ctx, out.as_mut_ptr());
+                            }
                             let count = u64::from_le_bytes(array::from_fn(|j| out[32 + j]));
                             TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
                         }
                     }
                     for ctx in contexts {
-                        unsafe { gpu_keypair_destroy(ctx); }
+                        unsafe {
+                            gpu_keypair_destroy(ctx);
+                        }
                     }
                 })
                 .unwrap(),
@@ -808,9 +841,7 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
     };
 
     let grind_start = Instant::now();
-    let reporter = spawn_hashrate_reporter(
-        Arc::clone(&shutdown), expected, grind_start,
-    );
+    let reporter = spawn_hashrate_reporter(Arc::clone(&shutdown), expected, grind_start);
 
     (0..args.num_cpus).into_par_iter().for_each(|i| {
         let timer = Instant::now();
@@ -1152,11 +1183,7 @@ fn print_keypair_result(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
     eprintln!("keypair json (solana-compatible): {:?}", keypair_json);
 }
 
-fn get_validated_bs58(
-    label: &str,
-    value: &Option<String>,
-    case_insensitive: bool,
-) -> &'static str {
+fn get_validated_bs58(label: &str, value: &Option<String>, case_insensitive: bool) -> &'static str {
     const BS58_CHARS: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     if let Some(ref s) = value {
         for c in s.chars() {
@@ -1201,9 +1228,13 @@ fn bs58_ci_matches(haystack: &str, pattern: &str, prefix: bool) -> bool {
     if h.len() != pattern.len() {
         return false;
     }
-    h.bytes()
-        .zip(pattern.bytes())
-        .all(|(a, b)| if b == b'L' { a == b'L' } else { a.to_ascii_lowercase() == b })
+    h.bytes().zip(pattern.bytes()).all(|(a, b)| {
+        if b == b'L' {
+            a == b'L'
+        } else {
+            a.to_ascii_lowercase() == b
+        }
+    })
 }
 
 #[cfg(feature = "gpu")]

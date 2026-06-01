@@ -325,13 +325,14 @@ extern "C" int gpu_grind_query(void *opaque)
     return cudaStreamQuery(ctx->stream) == cudaSuccess ? 1 : 0;
 }
 
-// out layout written by caller: [seed:16] [count:8]
+// out layout: [seed:16] [count:8] [done:1]
 extern "C" void gpu_grind_read(void *opaque, uint8_t *out)
 {
     GpuGrindCtx *ctx = (GpuGrindCtx *)opaque;
     cudaSetDevice(ctx->device_id);
     cudaMemcpy(out, ctx->d_buffer + ctx->out_offset, 16, cudaMemcpyDeviceToHost);
     cudaMemcpyFromSymbol(out + 16, count, 8, 0, cudaMemcpyDeviceToHost);
+    cudaMemcpyFromSymbol(out + 24, done, 1, 0, cudaMemcpyDeviceToHost);
 }
 
 extern "C" void gpu_grind_destroy(void *opaque)
