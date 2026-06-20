@@ -11,17 +11,11 @@
 
 __device__ static int kp_done = 0;
 __device__ static unsigned long long kp_count = 0;
-__device__ static bool kp_case_insensitive = false;
 
 #define KP_MAX_THREADS 128
 
 static __global__ void __launch_bounds__(KP_MAX_THREADS)
 vanity_keypair_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles);
-static __device__ bool kp_matches_target(
-    unsigned char *a,
-    unsigned char *prefix, uint64_t prefix_len,
-    unsigned char *suffix, uint64_t suffix_len,
-    ulong encoded_len);
 
 // ─── persistent context ─────────────────────────────────────────────────────
 
@@ -78,15 +72,51 @@ extern "C" void* gpu_keypair_init(
         exit(EXIT_FAILURE);
     }
 
-    // Upload invariant data (everything after the 32-byte seed slot)
-    uint64_t off = 32;
-    cudaMemcpy(ctx->d_buffer + off, &prefix_len, 8, cudaMemcpyHostToDevice); off += 8;
-    if (prefix_len > 0) cudaMemcpy(ctx->d_buffer + off, prefix, prefix_len, cudaMemcpyHostToDevice);
-    off += prefix_len;
-    cudaMemcpy(ctx->d_buffer + off, &suffix_len, 8, cudaMemcpyHostToDevice); off += 8;
-    if (suffix_len > 0) cudaMemcpy(ctx->d_buffer + off, suffix, suffix_len, cudaMemcpyHostToDevice);
+    /* Canonical base58 match indices + LUT (same scheme as gpu_grind_init). */
+    {
+        static const char alphabet_normal[59] =
+            "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        static const char alphabet_ci[59] =
+            "123456789abcdefghjkLmnpqrstuvwxyzabcdefghijkmnopqrstuvwxyz";
+        const char *alphabet = case_insensitive ? alphabet_ci : alphabet_normal;
 
-    cudaMemcpyToSymbol(kp_case_insensitive, &case_insensitive, 1, 0, cudaMemcpyHostToDevice);
+        uint8_t host_match_lut[58];
+        for (int i = 0; i < 58; ++i) {
+            host_match_lut[i] = (uint8_t)i;
+            for (int j = 0; j < i; ++j) {
+                if (alphabet[j] == alphabet[i]) {
+                    host_match_lut[i] = (uint8_t)j;
+                    break;
+                }
+            }
+        }
+
+        uint8_t prefix_idx[64];
+        uint8_t suffix_idx[64];
+        for (uint64_t i = 0; i < prefix_len; ++i) {
+            uint8_t v = 255;
+            for (int k = 0; k < 58; ++k) {
+                if ((uint8_t)alphabet[k] == prefix[i]) { v = host_match_lut[k]; break; }
+            }
+            prefix_idx[i] = v;
+        }
+        for (uint64_t i = 0; i < suffix_len; ++i) {
+            uint8_t v = 255;
+            for (int k = 0; k < 58; ++k) {
+                if ((uint8_t)alphabet[k] == suffix[i]) { v = host_match_lut[k]; break; }
+            }
+            suffix_idx[i] = v;
+        }
+
+        uint64_t off = 32;
+        cudaMemcpy(ctx->d_buffer + off, &prefix_len, 8, cudaMemcpyHostToDevice); off += 8;
+        if (prefix_len > 0) cudaMemcpy(ctx->d_buffer + off, prefix_idx, prefix_len, cudaMemcpyHostToDevice);
+        off += prefix_len;
+        cudaMemcpy(ctx->d_buffer + off, &suffix_len, 8, cudaMemcpyHostToDevice); off += 8;
+        if (suffix_len > 0) cudaMemcpy(ctx->d_buffer + off, suffix_idx, suffix_len, cudaMemcpyHostToDevice);
+
+        cudaMemcpyToSymbol(d_match_lut, host_match_lut, sizeof(host_match_lut));
+    }
 
     return (void *)ctx;
 }
@@ -167,7 +197,6 @@ vanity_keypair_search(uint8_t *buffer, uint64_t stride, unsigned long long max_c
     unsigned char seed[32];
     unsigned char privatek[64];
     unsigned char pubkey[32];
-    unsigned char encoded[45];
     ge_p3 A;
 
     CUDA_SHA256_CTX sha256_ctx;
@@ -218,9 +247,16 @@ vanity_keypair_search(uint8_t *buffer, uint64_t stride, unsigned long long max_c
         ge_scalarmult_base(&A, privatek);
         ge_p3_tobytes(pubkey, &A);
 
-        ulong enc_len = fd_base58_encode_32(pubkey, encoded, kp_case_insensitive);
+        uint pubkey_words[8];
+#pragma unroll
+        for (int k = 0; k < 8; ++k) {
+            pubkey_words[k] = ((uint)pubkey[4*k    ] << 24)
+                            | ((uint)pubkey[4*k + 1] << 16)
+                            | ((uint)pubkey[4*k + 2] <<  8)
+                            | ((uint)pubkey[4*k + 3]      );
+        }
 
-        if (kp_matches_target(encoded, prefix, prefix_len, suffix, suffix_len, enc_len))
+        if (fd_base58_check_match_32_words(pubkey_words, prefix, prefix_len, suffix, suffix_len))
         {
             if (atomicMax(&kp_done, 1) == 0) {
                 memcpy(out, seed, 32);
@@ -231,23 +267,6 @@ vanity_keypair_search(uint8_t *buffer, uint64_t stride, unsigned long long max_c
 
         memcpy(seed, privatek + 32, 32);
     }
-}
-
-static __device__ bool kp_matches_target(
-    unsigned char *a,
-    unsigned char *prefix, uint64_t prefix_len,
-    unsigned char *suffix, uint64_t suffix_len,
-    ulong encoded_len)
-{
-    for (uint64_t i = 0; i < prefix_len; i++) {
-        if (a[i] != prefix[i])
-            return false;
-    }
-    for (uint64_t i = 0; i < suffix_len; i++) {
-        if (a[encoded_len - suffix_len + i] != suffix[i])
-            return false;
-    }
-    return true;
 }
 
 // ─── doppler ──────────────────────────────────────────────────────────────

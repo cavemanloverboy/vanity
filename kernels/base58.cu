@@ -235,9 +235,6 @@ __device__ ulong fd_base58_encode_32(uint8_t *bytes,
     return encoded_length;
 }
 
-/* fd_base58_check_match_32 is defined inline in base58.h so that
-   __launch_bounds__ register caps on the calling kernel apply transitively. */
-
 #undef RAW58_SZ
 #undef ENCODED_SZ
 #undef SUFFIX
