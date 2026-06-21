@@ -254,6 +254,33 @@ fn bs58_pure_prefix_suffix_prob(prefix: &str, suffix: &str, n_bytes: usize) -> f
     total.to_f64().unwrap() / m_big.to_f64().unwrap()
 }
 
+/// How many distinct base58 alphabet symbols match `pattern_c` under the same
+/// rules as `bs58_ci_matches` (uppercase `L` in the pattern is literal only).
+fn bs58_ci_position_factor(pattern_c: char) -> f64 {
+    if !pattern_c.is_ascii_alphabetic() {
+        return 1.0;
+    }
+    let count = BS58_ALPHABET
+        .chars()
+        .filter(|&a| {
+            if pattern_c == 'L' {
+                a == 'L'
+            } else {
+                a.to_ascii_lowercase() == pattern_c.to_ascii_lowercase()
+            }
+        })
+        .count();
+    f64::from(count.max(1) as u32)
+}
+
+fn bs58_ci_factor(prefix: &str, suffix: &str) -> f64 {
+    prefix
+        .chars()
+        .chain(suffix.chars())
+        .map(bs58_ci_position_factor)
+        .product()
+}
+
 fn bs58_probability(prefix: &str, suffix: &str, case_insensitive: bool) -> f64 {
     let zeros = prefix.chars().take_while(|&c| c == '1').count();
     let pre_nz = &prefix[zeros..];
@@ -267,12 +294,7 @@ fn bs58_probability(prefix: &str, suffix: &str, case_insensitive: bool) -> f64 {
     let prob = p_zero * pure;
 
     if case_insensitive {
-        let ci_factor: f64 = prefix
-            .chars()
-            .chain(suffix.chars())
-            .filter(|c| c.is_ascii_alphabetic() && *c != 'L')
-            .fold(1.0, |acc, _| acc * 2.0);
-        prob * ci_factor
+        prob * bs58_ci_factor(prefix, suffix)
     } else {
         prob
     }
@@ -544,7 +566,7 @@ fn grind(mut args: GrindArgs) {
                             any_ready = true;
 
                             let time_sec = launch_times[i].elapsed().as_secs_f64();
-                            let mut out = [0u8; 25];
+                            let mut out = [0u8; 24];
                             unsafe {
                                 gpu_grind_read(ctx, out.as_mut_ptr());
                             }
@@ -552,30 +574,27 @@ fn grind(mut args: GrindArgs) {
                             let count = u64::from_le_bytes(array::from_fn(|j| out[16 + j]));
                             TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
 
-                            // Last byte is a flag indicating if the seed is valid
-                            if out[24] == 1 {
-                                let reconstructed: [u8; 32] = Sha256::new()
-                                    .chain_update(base)
-                                    .chain_update(&out[..16])
-                                    .chain_update(owner)
-                                    .finalize()
-                                    .into();
-                                let out_str = fd_bs58::encode_32(reconstructed);
-                                let out_str_check = maybe_bs58_aware_lowercase(&out_str, ci);
+                            let reconstructed: [u8; 32] = Sha256::new()
+                                .chain_update(base)
+                                .chain_update(&out[..16])
+                                .chain_update(owner)
+                                .finalize()
+                                .into();
+                            let out_str = fd_bs58::encode_32(reconstructed);
+                            let out_str_check = maybe_bs58_aware_lowercase(&out_str, ci);
 
-                                if out_str_check.starts_with(prefix)
-                                    && out_str_check.ends_with(suffix)
-                                {
-                                    eprintln!(
-                                        "\r\x1b[Kgpu {} match: {} in {:.3}s",
-                                        i, &out_str, time_sec
-                                    );
-                                    eprintln!(
-                                        "out seed = {out:?} -> {}",
-                                        core::str::from_utf8(&out[..16]).unwrap()
-                                    );
-                                    FOUND.fetch_add(1, Ordering::SeqCst);
-                                }
+                            if out_str_check.starts_with(prefix)
+                                && out_str_check.ends_with(suffix)
+                            {
+                                eprintln!(
+                                    "\r\x1b[Kgpu {} match: {} in {:.3}s",
+                                    i, &out_str, time_sec
+                                );
+                                eprintln!(
+                                    "out seed = {out:?} -> {}",
+                                    core::str::from_utf8(&out[..16]).unwrap()
+                                );
+                                FOUND.fetch_add(1, Ordering::SeqCst);
                             }
 
                             in_flight[i] = false;
@@ -600,7 +619,7 @@ fn grind(mut args: GrindArgs) {
                             while unsafe { gpu_grind_query(ctx) } == 0 {
                                 thread::sleep(Duration::from_millis(10));
                             }
-                            let mut out = [0u8; 25];
+                            let mut out = [0u8; 24];
                             unsafe {
                                 gpu_grind_read(ctx, out.as_mut_ptr());
                             }
@@ -1291,5 +1310,28 @@ fn parse_pubkey(input: &str) -> Result<Pubkey, String> {
 fn maybe_update_num_cpus(num_cpus: &mut u32) {
     if *num_cpus == 0 {
         *num_cpus = rayon::current_num_threads() as u32;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bs58_ci_factor_mithril_counts_i_once() {
+        // Base58 has lowercase i but not uppercase I; old code assumed 2^6=64.
+        assert_eq!(bs58_ci_factor("mithriL", ""), 16.0);
+    }
+
+    #[test]
+    fn bs58_ci_factor_literal_l_is_not_fuzzy() {
+        assert_eq!(bs58_ci_position_factor('L'), 1.0);
+        // Base58 has uppercase L but not lowercase l; pattern l still only maps to L.
+        assert_eq!(bs58_ci_position_factor('l'), 1.0);
+    }
+
+    #[test]
+    fn bs58_ci_factor_skips_non_letters() {
+        assert_eq!(bs58_ci_factor("1A", ""), 2.0);
     }
 }

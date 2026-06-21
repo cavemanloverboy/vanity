@@ -308,7 +308,9 @@ void gpu_grind_launch(void *opaque, uint8_t *seed) {
     if (c->in_flight) { clReleaseEvent(c->event); c->in_flight = 0; }
 
     cl_int zero = 0;
+    uint8_t out_zero[16] = {0};
     CK(clEnqueueWriteBuffer(c->queue, c->seed, CL_FALSE, 0, 32, seed, 0, NULL, NULL), "write seed");
+    CK(clEnqueueWriteBuffer(c->queue, c->out, CL_FALSE, 0, 16, out_zero, 0, NULL, NULL), "clear out");
     CK(clEnqueueWriteBuffer(c->queue, c->done, CL_FALSE, 0, sizeof zero, &zero, 0, NULL, NULL), "write done");
     CK(clSetKernelArg(c->kernel, 0, sizeof(cl_mem), &c->seed), "arg seed");
     CK(clSetKernelArg(c->kernel, 13, sizeof(cl_uint), &c->max_iters), "arg max_iters");
@@ -329,7 +331,7 @@ int gpu_grind_query(void *opaque) {
     return status == CL_COMPLETE ? 1 : 0;
 }
 
-/* out: [seed16:16][count:8][done:1] */
+/* out: [seed16:16][count:8] */
 void gpu_grind_read(void *opaque, uint8_t *out) {
     GrindCtx *c = (GrindCtx *)opaque;
     clWaitForEvents(1, &c->event);
@@ -341,7 +343,6 @@ void gpu_grind_read(void *opaque, uint8_t *out) {
     uint64_t total = 0;
     for (size_t i = 0; i < c->global; ++i) total += c->counts_host[i];
     memcpy(out + 16, &total, 8);
-    CK(clEnqueueReadBuffer(c->queue, c->done, CL_TRUE, 0, 1, out + 24, 0, NULL, NULL), "read done");
 
     clReleaseEvent(c->event);
     c->in_flight = 0;
@@ -429,7 +430,9 @@ void gpu_keypair_launch(void *opaque, uint8_t *seed) {
     if (c->in_flight) { clReleaseEvent(c->event); c->in_flight = 0; }
 
     cl_int zero = 0;
+    uint8_t out_zero[32] = {0};
     CK(clEnqueueWriteBuffer(c->queue, c->seed, CL_FALSE, 0, 32, seed, 0, NULL, NULL), "write seed");
+    CK(clEnqueueWriteBuffer(c->queue, c->out, CL_FALSE, 0, 32, out_zero, 0, NULL, NULL), "clear out");
     CK(clEnqueueWriteBuffer(c->queue, c->done, CL_FALSE, 0, sizeof zero, &zero, 0, NULL, NULL), "write done");
     CK(clSetKernelArg(c->kernel, 0, sizeof(cl_mem), &c->seed), "arg seed");
     CK(clSetKernelArg(c->kernel, 9, sizeof(cl_uint), &c->max_iters), "arg max_iters");
@@ -542,7 +545,9 @@ void gpu_doppler_launch(void *opaque, uint8_t *seed) {
     if (c->in_flight) { clReleaseEvent(c->event); c->in_flight = 0; }
 
     cl_int zero = 0;
+    uint8_t out_zero[32] = {0};
     CK(clEnqueueWriteBuffer(c->queue, c->seed, CL_FALSE, 0, 32, seed, 0, NULL, NULL), "write seed");
+    CK(clEnqueueWriteBuffer(c->queue, c->out, CL_FALSE, 0, 32, out_zero, 0, NULL, NULL), "clear out");
     CK(clEnqueueWriteBuffer(c->queue, c->done, CL_FALSE, 0, sizeof zero, &zero, 0, NULL, NULL), "write done");
     CK(clSetKernelArg(c->kernel, 0, sizeof(cl_mem), &c->seed), "arg seed");
     CK(clSetKernelArg(c->kernel, 5, sizeof(cl_uint), &c->max_iters), "arg max_iters");

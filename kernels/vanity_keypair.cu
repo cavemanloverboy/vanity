@@ -127,6 +127,7 @@ extern "C" void gpu_keypair_launch(void *opaque, uint8_t *seed)
     cudaSetDevice(ctx->device_id);
 
     cudaMemcpy(ctx->d_buffer, seed, 32, cudaMemcpyHostToDevice);
+    cudaMemset(ctx->d_buffer + ctx->out_offset, 0, 32);
 
     int zero = 0;
     unsigned long long zero_ull = 0;
@@ -156,7 +157,7 @@ extern "C" int gpu_keypair_query(void *opaque)
     return cudaStreamQuery(ctx->stream) == cudaSuccess ? 1 : 0;
 }
 
-// out layout written by caller: [seed:32] [count:8]
+// out layout: [seed:32] [count:8]
 extern "C" void gpu_keypair_read(void *opaque, uint8_t *out)
 {
     GpuKeypairCtx *ctx = (GpuKeypairCtx *)opaque;
@@ -357,6 +358,7 @@ extern "C" void gpu_doppler_launch(void *opaque, uint8_t *seed)
     cudaSetDevice(ctx->device_id);
 
     cudaMemcpy(ctx->d_buffer, seed, 32, cudaMemcpyHostToDevice);
+    cudaMemset(ctx->d_buffer + ctx->out_offset, 0, 32);
 
     int zero = 0;
     unsigned long long zero_ull = 0;
@@ -386,7 +388,7 @@ extern "C" int gpu_doppler_query(void *opaque)
     return cudaStreamQuery(ctx->stream) == cudaSuccess ? 1 : 0;
 }
 
-// out layout written by caller: [seed:32] [count:8]
+// out layout: [seed:32] [count:8]
 extern "C" void gpu_doppler_read(void *opaque, uint8_t *out)
 {
     GpuDopplerCtx *ctx = (GpuDopplerCtx *)opaque;
