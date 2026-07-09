@@ -1,3 +1,5 @@
+mod fast;
+
 use clap::Parser;
 use ed25519_dalek::SigningKey;
 use num_bigint::BigUint;
@@ -38,6 +40,7 @@ use std::{
 pub enum Command {
     Grind(GrindArgs),
     GrindKeypair(GrindKeypairArgs),
+    GrindKeypairFast(GrindKeypairArgs),
     GrindDoppler(DopplerArgs),
     Verify(VerifyArgs),
     #[cfg(feature = "deploy")]
@@ -384,6 +387,7 @@ fn main() {
     match command {
         Command::Grind(args) => grind(args),
         Command::GrindKeypair(args) => grind_keypair(args),
+        Command::GrindKeypairFast(args) => grind_keypair_fast(args),
         Command::GrindDoppler(args) => grind_doppler(args),
         Command::Verify(args) => verify(args),
         #[cfg(feature = "deploy")]
@@ -583,8 +587,7 @@ fn grind(mut args: GrindArgs) {
                             let out_str = fd_bs58::encode_32(reconstructed);
                             let out_str_check = maybe_bs58_aware_lowercase(&out_str, ci);
 
-                            if out_str_check.starts_with(prefix)
-                                && out_str_check.ends_with(suffix)
+                            if out_str_check.starts_with(prefix) && out_str_check.ends_with(suffix)
                             {
                                 eprintln!(
                                     "\r\x1b[Kgpu {} match: {} in {:.3}s",
@@ -927,6 +930,32 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
     );
 }
 
+fn grind_keypair_fast(mut args: GrindKeypairArgs) {
+    maybe_update_num_cpus(&mut args.num_cpus);
+    let prefix = get_validated_bs58("prefix", &args.prefix, args.case_insensitive);
+    let suffix = get_validated_bs58("suffix", &args.suffix, args.case_insensitive);
+
+    let expected = expected_attempts(prefix, suffix, args.case_insensitive);
+    let prob = bs58_probability(prefix, suffix, args.case_insensitive);
+    eprintln!("using {} cpus (fast path)", args.num_cpus);
+    let target_label = format_target_label(prefix, suffix);
+    eprintln!(
+        "target: {} | probability: {:.6e} | expected: {} attempts",
+        target_label,
+        prob,
+        (expected as u64).to_formatted_string(&Locale::en)
+    );
+
+    fast::run_grind(
+        prefix,
+        suffix,
+        args.case_insensitive,
+        args.num_cpus,
+        args.count,
+        expected,
+    );
+}
+
 // ─── doppler ──────────────────────────────────────────────────────────────
 
 fn grind_doppler(mut args: DopplerArgs) {
@@ -937,7 +966,11 @@ fn grind_doppler(mut args: DopplerArgs) {
     );
 
     let prob = doppler_probability(args.segments);
-    let expected = if prob > 0.0 { 1.0 / prob } else { f64::INFINITY };
+    let expected = if prob > 0.0 {
+        1.0 / prob
+    } else {
+        f64::INFINITY
+    };
 
     #[cfg(feature = "gpu")]
     eprintln!("using {} cpus, {} gpus", args.num_cpus, args.num_gpus);
@@ -974,22 +1007,32 @@ fn grind_doppler(mut args: DopplerArgs) {
                     for (i, &ctx) in contexts.iter().enumerate() {
                         let seed = new_gpu_seed(i as u32, 0);
                         launch_times[i] = Instant::now();
-                        unsafe { gpu_doppler_launch(ctx, seed.as_ptr()); }
+                        unsafe {
+                            gpu_doppler_launch(ctx, seed.as_ptr());
+                        }
                         in_flight[i] = true;
                     }
 
                     loop {
-                        if done(target_count) { break; }
+                        if done(target_count) {
+                            break;
+                        }
 
                         let mut any_ready = false;
                         for (i, &ctx) in contexts.iter().enumerate() {
-                            if !in_flight[i] { continue; }
-                            if unsafe { gpu_doppler_query(ctx) } == 0 { continue; }
+                            if !in_flight[i] {
+                                continue;
+                            }
+                            if unsafe { gpu_doppler_query(ctx) } == 0 {
+                                continue;
+                            }
                             any_ready = true;
 
                             let time_sec = launch_times[i].elapsed().as_secs_f64();
                             let mut out = [0u8; 40];
-                            unsafe { gpu_doppler_read(ctx, out.as_mut_ptr()); }
+                            unsafe {
+                                gpu_doppler_read(ctx, out.as_mut_ptr());
+                            }
 
                             let found_seed: [u8; 32] = out[..32].try_into().unwrap();
                             let signing_key = SigningKey::from_bytes(&found_seed);
@@ -1013,7 +1056,9 @@ fn grind_doppler(mut args: DopplerArgs) {
                                 iterations[i] += 1;
                                 let seed = new_gpu_seed(i as u32, iterations[i]);
                                 launch_times[i] = Instant::now();
-                                unsafe { gpu_doppler_launch(ctx, seed.as_ptr()); }
+                                unsafe {
+                                    gpu_doppler_launch(ctx, seed.as_ptr());
+                                }
                                 in_flight[i] = true;
                             }
                         }
@@ -1029,13 +1074,17 @@ fn grind_doppler(mut args: DopplerArgs) {
                                 thread::sleep(Duration::from_millis(10));
                             }
                             let mut out = [0u8; 40];
-                            unsafe { gpu_doppler_read(ctx, out.as_mut_ptr()); }
+                            unsafe {
+                                gpu_doppler_read(ctx, out.as_mut_ptr());
+                            }
                             let count = u64::from_le_bytes(array::from_fn(|j| out[32 + j]));
                             TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
                         }
                     }
                     for ctx in contexts {
-                        unsafe { gpu_doppler_destroy(ctx); }
+                        unsafe {
+                            gpu_doppler_destroy(ctx);
+                        }
                     }
                 })
                 .unwrap(),
@@ -1121,7 +1170,11 @@ fn doppler_count_segments(pubkey: &[u8; 32]) -> u32 {
     let mut matched = 0;
     for s in 0..4 {
         let o = s * 8;
-        let fill = if pubkey[o + 3] & 0x80 != 0 { 0xFF } else { 0x00 };
+        let fill = if pubkey[o + 3] & 0x80 != 0 {
+            0xFF
+        } else {
+            0x00
+        };
         if pubkey[o + 4] == fill
             && pubkey[o + 5] == fill
             && pubkey[o + 6] == fill
@@ -1157,7 +1210,11 @@ fn print_doppler_result(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
     );
     for s in 0..4usize {
         let o = s * 8;
-        let fill = if pubkey[o + 3] & 0x80 != 0 { 0xFF } else { 0x00 };
+        let fill = if pubkey[o + 3] & 0x80 != 0 {
+            0xFF
+        } else {
+            0x00
+        };
         let sign_extendable = pubkey[o + 4] == fill
             && pubkey[o + 5] == fill
             && pubkey[o + 6] == fill
