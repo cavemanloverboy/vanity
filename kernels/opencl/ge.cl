@@ -74,6 +74,35 @@ void ge_p3_tobytes(uchar *s, const ge_p3 *h) {
     s[31] ^= fe_isnegative(x) << 7;
 }
 
+/* Compress using a precomputed Z^{-1} (from fe_batch_invert). */
+void ge_p3_tobytes_inv(uchar *s, const fe X, const fe Y, const fe zinv) {
+    fe x;
+    fe y;
+    fe_mul(x, X, zinv);
+    fe_mul(y, Y, zinv);
+    fe_tobytes(s, y);
+    s[31] ^= fe_isnegative(x) << 7;
+}
+
+/* Montgomery batch invert: zs[i] <- 1/zs[i] for i in [0, n). n >= 1. */
+#define KP_BATCH_MAX 8
+void fe_batch_invert(fe zs[KP_BATCH_MAX], int n) {
+    fe scratch[KP_BATCH_MAX];
+    fe acc;
+    fe_1(acc);
+    for (int i = 0; i < n; i++) {
+        fe_copy(scratch[i], acc);
+        fe_mul(acc, acc, zs[i]);
+    }
+    fe_invert(acc, acc);
+    for (int i = n - 1; i >= 0; i--) {
+        fe tmp;
+        fe_mul(tmp, acc, zs[i]);
+        fe_mul(zs[i], acc, scratch[i]);
+        fe_copy(acc, tmp);
+    }
+}
+
 static uchar negative(signed char b) {
     uint64_t x = b;
     x >>= 63;
