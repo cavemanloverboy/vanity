@@ -375,6 +375,7 @@ impl Fe8 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 pub fn bytes_to_limbs52(b: &[u8; 32]) -> [u64; 5] {
     let load8 = |i: usize| -> u64 {
         u64::from_le_bytes([
@@ -397,6 +398,7 @@ pub fn bytes_to_limbs52(b: &[u8; 32]) -> [u64; 5] {
     ]
 }
 
+#[cfg(target_arch = "x86_64")]
 pub const M52_CONST: u64 = (1u64 << 52) - 1;
 
 // ─── 8-lane Edwards points ───────────────────────────────────────────────────
@@ -455,15 +457,24 @@ impl Point8 {
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 const SIMD_W: usize = 5; // comb radix = 2^SIMD_W
+#[cfg(target_arch = "x86_64")]
 const SIMD_WINDOWS: usize = (256 + SIMD_W - 1) / SIMD_W;
+#[cfg(target_arch = "x86_64")]
 const SIMD_POS: usize = 1 << (SIMD_W - 1); // positive multiples per window
+#[cfg(target_arch = "x86_64")]
 const SIMD_ENTRIES: usize = 2 * SIMD_POS + 1; // signed digits -POS..POS
+#[cfg(target_arch = "x86_64")]
 const SIMD_FIELDS: usize = 4;
+#[cfg(target_arch = "x86_64")]
 const SIMD_ENTRY_U64: usize = SIMD_FIELDS * 5; // 20
+#[cfg(target_arch = "x86_64")]
 const SIMD_WINDOW_U64: usize = SIMD_ENTRIES * SIMD_ENTRY_U64; // 660
+#[cfg(target_arch = "x86_64")]
 pub const SIMD_TABLE_LEN: usize = SIMD_WINDOWS * SIMD_WINDOW_U64;
 
+#[cfg(target_arch = "x86_64")]
 pub fn build_simd_table() -> [u64; SIMD_TABLE_LEN] {
     use crate::fast::group::{edwards_d2, Niels};
     use crate::fast::BASE;
@@ -521,6 +532,7 @@ pub fn build_simd_table() -> [u64; SIMD_TABLE_LEN] {
     table
 }
 
+#[cfg(target_arch = "x86_64")]
 #[inline]
 fn to_radix(bytes: &[u8; 32]) -> [i8; SIMD_WINDOWS] {
     let mask = ((1u16 << SIMD_W) - 1) as u16;
@@ -672,6 +684,7 @@ unsafe fn write_compressed(p: &Point8, zinv: &Fe8) -> [[u8; 32]; 8] {
     out
 }
 
+#[cfg(target_arch = "x86_64")]
 pub const MAX_GROUPS: usize = 64;
 
 #[cfg(target_arch = "x86_64")]

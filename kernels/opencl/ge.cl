@@ -1,7 +1,7 @@
 /* ge.cl — OpenCL port of kernels/ed25519/ge.cu (ref10 group operations).
 
-   Mirrors the CUDA source; the only structural change is cmov_c/fe_cmov_c
-   for reading the precomputed base table out of __constant memory, since
+   Mirrors the CUDA source; the only structural change is fe_copy_c for
+   reading the precomputed base table out of __constant memory, since
    OpenCL 1.2 lacks a generic address space (see fe.cl). */
 
 static void ge_madd(ge_p1p1 *r, const ge_p3 *p, const ge_precomp *q) {
@@ -74,55 +74,37 @@ void ge_p3_tobytes(uchar *s, const ge_p3 *h) {
     s[31] ^= fe_isnegative(x) << 7;
 }
 
-static uchar equal(signed char b, signed char c) {
-    uchar ub = b;
-    uchar uc = c;
-    uchar x = ub ^ uc;
-    uint64_t y = x;
-    y -= 1;
-    y >>= 63;
-    return (uchar) y;
-}
-
 static uchar negative(signed char b) {
     uint64_t x = b;
     x >>= 63;
     return (uchar) x;
 }
 
-/* Conditional move from a private-memory precomp (minust). */
-static void cmov(ge_precomp *t, const ge_precomp *u, uchar b) {
-    fe_cmov(t->yplusx, u->yplusx, b);
-    fe_cmov(t->yminusx, u->yminusx, b);
-    fe_cmov(t->xy2d, u->xy2d, b);
-}
-
-/* Conditional move from a __constant precomp (the base table). */
-static void cmov_c(ge_precomp *t, __constant const ge_precomp *u, uchar b) {
-    fe_cmov_c(t->yplusx, u->yplusx, b);
-    fe_cmov_c(t->yminusx, u->yminusx, b);
-    fe_cmov_c(t->xy2d, u->xy2d, b);
-}
-
 static void ge_select(ge_precomp *t, int pos, signed char b) {
-    ge_precomp minust;
+    /* Vanity grinding is not constant-time; direct table lookup beats the
+       ref10 cmov ladder (8 fe_cmovs × 8 table slots per nibble). */
     uchar bnegative = negative(b);
     uchar babs = b - (((-bnegative) & b) << 1);
-    fe_1(t->yplusx);
-    fe_1(t->yminusx);
-    fe_0(t->xy2d);
-    cmov_c(t, &base[pos][0], equal(babs, 1));
-    cmov_c(t, &base[pos][1], equal(babs, 2));
-    cmov_c(t, &base[pos][2], equal(babs, 3));
-    cmov_c(t, &base[pos][3], equal(babs, 4));
-    cmov_c(t, &base[pos][4], equal(babs, 5));
-    cmov_c(t, &base[pos][5], equal(babs, 6));
-    cmov_c(t, &base[pos][6], equal(babs, 7));
-    cmov_c(t, &base[pos][7], equal(babs, 8));
-    fe_copy(minust.yplusx, t->yminusx);
-    fe_copy(minust.yminusx, t->yplusx);
-    fe_neg(minust.xy2d, t->xy2d);
-    cmov(t, &minust, bnegative);
+
+    if (babs == 0) {
+        fe_1(t->yplusx);
+        fe_1(t->yminusx);
+        fe_0(t->xy2d);
+        return;
+    }
+
+    __constant const ge_precomp *u = &base[pos][babs - 1];
+    fe_copy_c(t->yplusx, u->yplusx);
+    fe_copy_c(t->yminusx, u->yminusx);
+    fe_copy_c(t->xy2d, u->xy2d);
+
+    if (bnegative) {
+        fe tmp;
+        fe_copy(tmp, t->yplusx);
+        fe_copy(t->yplusx, t->yminusx);
+        fe_copy(t->yminusx, tmp);
+        fe_neg(t->xy2d, t->xy2d);
+    }
 }
 
 void ge_scalarmult_base(ge_p3 *h, const uchar *a) {
