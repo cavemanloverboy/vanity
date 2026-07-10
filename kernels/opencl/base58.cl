@@ -1,9 +1,9 @@
 /* base58.cl — OpenCL port of kernels/base58.{h,cu}.
 
    Two entry points, mirroring the CUDA build:
-     - fd_base58_encode_32: full bytes->string encode (keypair kernel).
+     - fd_base58_encode_32: full bytes->string encode (kept for completeness).
      - fd_base58_check_match_32_words: fused encode + prefix/suffix match in
-       word form, with early rejection (grind kernel).
+       word form, with early rejection (grind + keypair kernels).
    Both descend from Firedancer's fd_base58 (cavemanloverboy port). */
 
 __constant uchar base58_chars[]    = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
