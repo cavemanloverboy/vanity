@@ -2,13 +2,13 @@
    kernels/vanity_keypair.cu.
 
    Each work-item derives a 32-byte seed from (host_seed || idx), then walks
-   a chain of ed25519 keypairs: SHA-512(seed) -> clamp -> scalar-mult base ->
-   compress -> fused base58 early-reject match. The next seed is the high
-   half of the SHA-512 output (matching the CUDA loop).
+   a chain of ed25519 keypairs: SHA-512(seed) -> clamp -> radix-32 comb
+   scalarmult -> batch compress -> fused base58 early-reject match. The next
+   seed is the high half of the SHA-512 output (matching the CUDA loop).
 
    Keys are processed in batches of KP_BATCH: one Montgomery invert covers
-   the whole batch (same amortization as the CPU fast path), then each
-   pubkey is compressed with the shared inverses and early-reject matched.
+   the whole batch (same amortization as the CPU fast path). Fixed-base
+   mult uses a radix-32 comb table (52 windows) built once at init.
 
    Same OpenCL-driven changes as the grind kernel: host-provided max_iters
    instead of clock64(), and a per-work-item counts buffer summed on the
@@ -27,6 +27,7 @@ __kernel void vanity_keypair_search(
     __global uchar *out,                 /* 32 bytes: matched seed */
     __global volatile int *done,
     __global uint *counts,
+    __global const ge_niels *comb,       /* COMB_TABLE_LEN entries */
     uint max_iters)
 {
     ulong idx = get_global_id(0);
@@ -85,7 +86,7 @@ __kernel void vanity_keypair_search(
             privatek[31] &= 63;
             privatek[31] |= 64;
 
-            ge_scalarmult_base(&A, privatek);
+            ge_scalarmult_base_comb(&A, privatek, comb);
             fe_copy(Xs[j], A.X);
             fe_copy(Ys[j], A.Y);
             fe_copy(Zs[j], A.Z);

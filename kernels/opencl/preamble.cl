@@ -22,6 +22,14 @@ typedef struct { fe X; fe Y; fe Z; }        ge_p2;
 typedef struct { fe X; fe Y; fe Z; fe T; }  ge_p3;
 typedef struct { fe X; fe Y; fe Z; fe T; }  ge_p1p1;
 typedef struct { fe yplusx; fe yminusx; fe xy2d; } ge_precomp;
+/* Extended Niels for radix-32 comb (matches CPU SIMD fixed-base table). */
+typedef struct { fe yplusx; fe yminusx; fe z; fe t2d; } ge_niels;
+
+/* Radix-32 comb: 52 windows × 16 positive multiples. */
+#define COMB_W        5
+#define COMB_WINDOWS  52
+#define COMB_POS      16
+#define COMB_TABLE_LEN (COMB_WINDOWS * COMB_POS)
 
 /* Used only by the (unused-on-this-path) fe_frombytes; kept for fidelity
    with the upstream ref10 source. Private address space is sufficient. */
