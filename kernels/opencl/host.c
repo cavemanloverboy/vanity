@@ -370,10 +370,9 @@ typedef struct {
     cl_command_queue queue;
     cl_program       program;
     cl_kernel        kernel;
-    cl_mem  seed, prefix, suffix, out, done, counts;
+    cl_mem  seed, mlut, prefix, suffix, out, done, counts;
     size_t  local, global;
     uint32_t prefix_len, suffix_len;
-    cl_int   case_insensitive;
     uint32_t max_iters;
     cl_event event;
     int      in_flight;
@@ -402,22 +401,50 @@ void *gpu_keypair_init(int id, uint8_t *prefix, uint64_t prefix_len,
     c->global = (size_t)compute_units(dev) * KP_WAVES * c->local;
     c->prefix_len = (uint32_t)prefix_len;
     c->suffix_len = (uint32_t)suffix_len;
-    c->case_insensitive = case_insensitive ? 1 : 0;
     c->max_iters = KP_ITERS_INIT;
     c->counts_host = (uint32_t *)malloc(c->global * sizeof(uint32_t));
 
+    /* Canonical base58 match indices + LUT (same scheme as gpu_grind_init /
+       CUDA gpu_keypair_init). Case folding lives in the LUT / indices. */
+    static const char alphabet_normal[59] =
+        "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    static const char alphabet_ci[59] =
+        "123456789abcdefghjkLmnpqrstuvwxyzabcdefghijkmnopqrstuvwxyz";
+    const char *alphabet = case_insensitive ? alphabet_ci : alphabet_normal;
+
+    uint8_t match_lut[58];
+    for (int i = 0; i < 58; ++i) {
+        match_lut[i] = (uint8_t)i;
+        for (int j = 0; j < i; ++j)
+            if (alphabet[j] == alphabet[i]) { match_lut[i] = (uint8_t)j; break; }
+    }
+    uint8_t prefix_idx[64], suffix_idx[64];
+    for (uint64_t i = 0; i < prefix_len; ++i) {
+        uint8_t v = 255;
+        for (int k = 0; k < 58; ++k)
+            if ((uint8_t)alphabet[k] == prefix[i]) { v = match_lut[k]; break; }
+        prefix_idx[i] = v;
+    }
+    for (uint64_t i = 0; i < suffix_len; ++i) {
+        uint8_t v = 255;
+        for (int k = 0; k < 58; ++k)
+            if ((uint8_t)alphabet[k] == suffix[i]) { v = match_lut[k]; break; }
+        suffix_idx[i] = v;
+    }
+
     c->seed   = clCreateBuffer(c->context, CL_MEM_READ_ONLY, 32, NULL, &err); CK(err, "buf seed");
-    c->prefix = buf_copy(c->context, prefix_len, prefix);
-    c->suffix = buf_copy(c->context, suffix_len, suffix);
+    c->mlut   = buf_copy(c->context, sizeof match_lut, match_lut);
+    c->prefix = buf_copy(c->context, prefix_len, prefix_idx);
+    c->suffix = buf_copy(c->context, suffix_len, suffix_idx);
     c->out    = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, 32, NULL, &err); CK(err, "buf out");
     c->done   = clCreateBuffer(c->context, CL_MEM_READ_WRITE, sizeof(cl_int), NULL, &err); CK(err, "buf done");
     c->counts = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, c->global * sizeof(cl_uint), NULL, &err); CK(err, "buf counts");
 
-    CK(clSetKernelArg(c->kernel, 1, sizeof(cl_mem), &c->prefix), "arg prefix");
-    CK(clSetKernelArg(c->kernel, 2, sizeof(cl_uint), &c->prefix_len), "arg prefix_len");
-    CK(clSetKernelArg(c->kernel, 3, sizeof(cl_mem), &c->suffix), "arg suffix");
-    CK(clSetKernelArg(c->kernel, 4, sizeof(cl_uint), &c->suffix_len), "arg suffix_len");
-    CK(clSetKernelArg(c->kernel, 5, sizeof(cl_int), &c->case_insensitive), "arg ci");
+    CK(clSetKernelArg(c->kernel, 1, sizeof(cl_mem), &c->mlut), "arg mlut");
+    CK(clSetKernelArg(c->kernel, 2, sizeof(cl_mem), &c->prefix), "arg prefix");
+    CK(clSetKernelArg(c->kernel, 3, sizeof(cl_uint), &c->prefix_len), "arg prefix_len");
+    CK(clSetKernelArg(c->kernel, 4, sizeof(cl_mem), &c->suffix), "arg suffix");
+    CK(clSetKernelArg(c->kernel, 5, sizeof(cl_uint), &c->suffix_len), "arg suffix_len");
     CK(clSetKernelArg(c->kernel, 6, sizeof(cl_mem), &c->out), "arg out");
     CK(clSetKernelArg(c->kernel, 7, sizeof(cl_mem), &c->done), "arg done");
     CK(clSetKernelArg(c->kernel, 8, sizeof(cl_mem), &c->counts), "arg counts");
@@ -475,7 +502,7 @@ void gpu_keypair_destroy(void *opaque) {
     KeypairCtx *c = (KeypairCtx *)opaque;
     clFinish(c->queue);
     if (c->in_flight) clReleaseEvent(c->event);
-    cl_mem bufs[] = {c->seed,c->prefix,c->suffix,c->out,c->done,c->counts};
+    cl_mem bufs[] = {c->seed,c->mlut,c->prefix,c->suffix,c->out,c->done,c->counts};
     for (size_t i = 0; i < sizeof bufs / sizeof bufs[0]; ++i) clReleaseMemObject(bufs[i]);
     clReleaseKernel(c->kernel);
     clReleaseProgram(c->program);

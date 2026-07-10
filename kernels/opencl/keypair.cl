@@ -3,29 +3,19 @@
 
    Each work-item derives a 32-byte seed from (host_seed || idx), then walks
    a chain of ed25519 keypairs: SHA-512(seed) -> clamp -> scalar-mult base ->
-   compress -> base58, testing each pubkey against the prefix/suffix. The
-   next seed is the high half of the SHA-512 output (matching the CUDA loop).
+   compress -> fused base58 early-reject match. The next seed is the high
+   half of the SHA-512 output (matching the CUDA loop).
 
    Same OpenCL-driven changes as the grind kernel: host-provided max_iters
    instead of clock64(), and a per-work-item counts buffer summed on the
-   host instead of a 64-bit atomic. */
-
-static bool kp_matches_target(const uchar *a,
-                              __global const uchar *prefix, uint prefix_len,
-                              __global const uchar *suffix, uint suffix_len,
-                              ulong encoded_len) {
-    for (uint i = 0; i < prefix_len; i++)
-        if (a[i] != prefix[i]) return false;
-    for (uint i = 0; i < suffix_len; i++)
-        if (a[encoded_len - suffix_len + i] != suffix[i]) return false;
-    return true;
-}
+   host instead of a 64-bit atomic. Prefix/suffix are canonical raw_base58
+   indices; match_lut folds case-insensitive aliases (same as vanity.cl). */
 
 __kernel void vanity_keypair_search(
     __global const uchar *host_seed,     /* 32 bytes */
+    __constant const uchar *match_lut,   /* 58 */
     __global const uchar *prefix, uint prefix_len,
     __global const uchar *suffix, uint suffix_len,
-    int case_insensitive,
     __global uchar *out,                 /* 32 bytes: matched seed */
     __global volatile int *done,
     __global uint *counts,
@@ -36,7 +26,6 @@ __kernel void vanity_keypair_search(
     uchar seed[32];
     uchar privatek[64];
     uchar pubkey[32];
-    uchar encoded[45];
     ge_p3 A;
 
     /* seed = SHA-256(host_seed[32] || idx[8 LE]). Copy host_seed into
@@ -81,9 +70,16 @@ __kernel void vanity_keypair_search(
         ge_scalarmult_base(&A, privatek);
         ge_p3_tobytes(pubkey, &A);
 
-        ulong enc_len = fd_base58_encode_32(pubkey, encoded, case_insensitive != 0);
+        uint pubkey_words[8];
+        for (int k = 0; k < 8; ++k) {
+            pubkey_words[k] = ((uint)pubkey[4*k    ] << 24)
+                            | ((uint)pubkey[4*k + 1] << 16)
+                            | ((uint)pubkey[4*k + 2] <<  8)
+                            | ((uint)pubkey[4*k + 3]      );
+        }
 
-        if (kp_matches_target(encoded, prefix, prefix_len, suffix, suffix_len, enc_len)) {
+        if (fd_base58_check_match_32_words(pubkey_words, prefix, prefix_len,
+                                           suffix, suffix_len, match_lut)) {
             if (atomic_cmpxchg(done, 0, 1) == 0)
                 for (int i = 0; i < 32; i++) out[i] = seed[i];
             iter++;          /* count the matching attempt */
