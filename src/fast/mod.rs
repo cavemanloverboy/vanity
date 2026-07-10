@@ -8,13 +8,11 @@ use check_match::MatchTarget;
 use field::{batch_invert, Fe};
 use group::{edwards_d2, Niels, Point};
 
-use num_format::{Locale, ToFormattedString};
 use sha2::{Digest, Sha512};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-    Arc, OnceLock,
+    OnceLock,
 };
-use std::time::Instant;
 
 pub const BATCH: usize = 512;
 
@@ -286,106 +284,65 @@ static GRIND_FOUND: AtomicU32 = AtomicU32::new(0);
 static GRIND_TOTAL: AtomicU64 = AtomicU64::new(0);
 static GRIND_ABORT: AtomicBool = AtomicBool::new(false);
 
-fn format_duration(secs: f64) -> String {
-    if secs < 0.0 {
-        return "any moment".into();
-    }
-    if secs < 60.0 {
-        return format!("{:.0}s", secs);
-    }
-    let s = secs as u64;
-    if s < 3600 {
-        return format!("{}m {}s", s / 60, s % 60);
-    }
-    if s < 86400 {
-        return format!("{}h {}m", s / 3600, (s % 3600) / 60);
-    }
-    format!("{}d {}h", s / 86400, (s % 86400) / 3600)
+pub fn reset_grind() {
+    GRIND_FOUND.store(0, Ordering::SeqCst);
+    GRIND_TOTAL.store(0, Ordering::SeqCst);
+    GRIND_ABORT.store(false, Ordering::SeqCst);
 }
 
-pub fn run_grind(
+pub fn request_abort() {
+    GRIND_ABORT.store(true, Ordering::SeqCst);
+}
+
+pub fn add_attempts(n: u64) {
+    GRIND_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+/// Returns the previous found count (caller should print only if `prev < count`).
+pub fn note_found() -> u32 {
+    GRIND_FOUND.fetch_add(1, Ordering::SeqCst)
+}
+
+pub fn is_done(count: u32) -> bool {
+    grind_done(count)
+}
+
+pub fn total_attempts() -> u64 {
+    GRIND_TOTAL.load(Ordering::Relaxed)
+}
+
+pub fn backend_name() -> &'static str {
+    if simd::available() {
+        "avx512-ifma (8-lane)"
+    } else {
+        "scalar"
+    }
+}
+
+/// Run batched CPU keypair workers until `count` matches or abort.
+/// Call [`reset_grind`] first if coordinating with a GPU thread that shares
+/// these counters via [`add_attempts`] / [`note_found`] / [`is_done`].
+pub fn run_cpu_workers(
     prefix: &'static str,
     suffix: &'static str,
     case_insensitive: bool,
     num_cpus: u32,
     count: u32,
-    expected: f64,
 ) {
-    GRIND_FOUND.store(0, Ordering::SeqCst);
-    GRIND_TOTAL.store(0, Ordering::SeqCst);
-    GRIND_ABORT.store(false, Ordering::SeqCst);
-
-    let use_simd = simd::available();
-    eprintln!(
-        "backend: {}",
-        if use_simd {
-            "avx512-ifma (8-lane)"
-        } else {
-            "scalar"
-        }
-    );
-
     let target = MatchTarget::new(prefix, suffix, case_insensitive);
 
-    let start = Instant::now();
-    let shutdown = Arc::new(AtomicBool::new(false));
-
-    // Reporter thread.
-    let reporter = {
-        let shutdown = Arc::clone(&shutdown);
-        std::thread::spawn(move || loop {
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            if shutdown.load(Ordering::Relaxed) {
-                break;
-            }
-            let elapsed = start.elapsed().as_secs_f64().max(1e-9);
-            let total = GRIND_TOTAL.load(Ordering::Relaxed);
-            let rate = total as f64 / elapsed;
-            let e_time = if rate > 0.0 && expected.is_finite() {
-                format!(
-                    " | E[grind_time] = {}",
-                    format_duration(expected / rate)
-                )
+    (0..num_cpus).into_par_iter().for_each(|_| {
+        #[cfg(target_arch = "x86_64")]
+        {
+            if simd::available() {
+                unsafe { grind_thread_simd(&target, count) };
             } else {
-                String::new()
-            };
-            eprint!(
-                "\r\x1b[K{} attempts | {} attempts/sec | elapsed: {}{}",
-                total.to_formatted_string(&Locale::en),
-                (rate as u64).to_formatted_string(&Locale::en),
-                format_duration(elapsed),
-                e_time,
-            );
-            let _ = std::io::Write::flush(&mut std::io::stderr());
-        })
-    };
-
-    (0..num_cpus)
-        .into_par_iter()
-        .for_each(|_| {
-            #[cfg(target_arch = "x86_64")]
-            {
-                if use_simd {
-                    unsafe { grind_thread_simd(&target, count) };
-                } else {
-                    grind_thread_scalar(&target, count);
-                }
+                grind_thread_scalar(&target, count);
             }
-            #[cfg(not(target_arch = "x86_64"))]
-            grind_thread_scalar(&target, count);
-        });
-
-    shutdown.store(true, Ordering::Relaxed);
-    let _ = reporter.join();
-    let elapsed = start.elapsed().as_secs_f64().max(1e-9);
-    let total = GRIND_TOTAL.load(Ordering::Relaxed);
-    let rate = total as f64 / elapsed;
-    eprintln!(
-        "\r\x1b[Kdone: {} attempts in {} at {} attempts/sec",
-        total.to_formatted_string(&Locale::en),
-        format_duration(elapsed),
-        (rate as u64).to_formatted_string(&Locale::en),
-    );
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        grind_thread_scalar(&target, count);
+    });
 }
 
 fn print_keypair(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
