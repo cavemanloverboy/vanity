@@ -25,6 +25,7 @@ By default the CUDA build emits code for several architectures (Turing through A
 ```bash
 VANITY_CUDA_ARCH=86 cargo install vanity --features=gpu
 ```
+
 If a launch prints `no kernel image is available for execution on the device`, the binary was built without your GPU's architecture — rebuild with the right `VANITY_CUDA_ARCH`.
 
 On machines without CUDA (AMD / Intel / Apple GPUs, or no NVIDIA driver), build the OpenCL backend instead:
@@ -32,6 +33,7 @@ On machines without CUDA (AMD / Intel / Apple GPUs, or no NVIDIA driver), build 
 ```bash
 cargo install vanity --features=opencl
 ```
+
 The OpenCL backend needs only an OpenCL 1.2 ICD loader and headers at build time (`-lOpenCL` on Linux, the system `OpenCL.framework` on macOS); kernels are compiled at runtime for whatever device is present. It exposes the same CLI and `--num-gpus` flag as the CUDA build. The two GPU backends are mutually exclusive — pick one feature at build time.
 
 If you don't have a GPU, consider using [vast.ai](https://cloud.vast.ai/?ref_id=126830). Pls use this referral link so that I can keep using GPUs.
@@ -104,7 +106,9 @@ pub fn create_account_with_seed(
 `grind-keypair` searches genuine ed25519 keypairs whose **public key** matches a
 base58 `--prefix` and/or `--suffix`. This is the classic "vanity wallet/mint"
 case: the result is a standalone keypair you can sign with. It's slower than
-`grind` because each attempt computes an ed25519 scalar multiplication.
+`grind` because each attempt computes an ed25519 scalar multiplication. The CPU
+path uses a batched custom ed25519 implementation (AVX-512 IFMA when available);
+GPUs use the CUDA/OpenCL keypair kernels.
 
 ```bash
 vanity grind-keypair --prefix bob --suffix xyz --num-gpus 1
@@ -189,7 +193,7 @@ Approximate single-device throughput:
 | Backend | Device | seeds/s | keypairs/s |
 | --- | --- | --- | --- |
 | CUDA   | RTX 4090   | ~1.25 B | ~65 M  |
-| OpenCL | M3 Max     | ~315 M  | ~9.5 M |
+| OpenCL | Apple Silicon | ~315 M  | ~15 M  |
 
 `grind` is far faster because each attempt is just a SHA-256 hash. Keypair modes (`grind-keypair`/`grind-doppler`) perform full sha512 and ed25519 scalar multiplication per attempt. Throughput scales roughly linearly with `--num-gpus`.
 

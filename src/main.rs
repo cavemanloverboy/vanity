@@ -40,7 +40,6 @@ use std::{
 pub enum Command {
     Grind(GrindArgs),
     GrindKeypair(GrindKeypairArgs),
-    GrindKeypairFast(GrindKeypairArgs),
     GrindDoppler(DopplerArgs),
     Verify(VerifyArgs),
     #[cfg(feature = "deploy")]
@@ -380,6 +379,7 @@ fn main() {
         if ABORTED.swap(true, Ordering::SeqCst) {
             std::process::exit(130);
         }
+        fast::request_abort();
         eprintln!("\naborting… (press Ctrl-C again to force-quit)");
     });
 
@@ -387,7 +387,6 @@ fn main() {
     match command {
         Command::Grind(args) => grind(args),
         Command::GrindKeypair(args) => grind_keypair(args),
-        Command::GrindKeypairFast(args) => grind_keypair_fast(args),
         Command::GrindDoppler(args) => grind_doppler(args),
         Command::Verify(args) => verify(args),
         #[cfg(feature = "deploy")]
@@ -731,9 +730,18 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
     let expected = expected_attempts(prefix, suffix, args.case_insensitive);
     let prob = bs58_probability(prefix, suffix, args.case_insensitive);
     #[cfg(feature = "gpu")]
-    eprintln!("using {} cpus, {} gpus", args.num_cpus, args.num_gpus);
+    eprintln!(
+        "using {} cpus, {} gpus (cpu backend: {})",
+        args.num_cpus,
+        args.num_gpus,
+        fast::backend_name()
+    );
     #[cfg(not(feature = "gpu"))]
-    eprintln!("using {} cpus", args.num_cpus);
+    eprintln!(
+        "using {} cpus (cpu backend: {})",
+        args.num_cpus,
+        fast::backend_name()
+    );
     let target_label = format_target_label(prefix, suffix);
     eprintln!(
         "target: {} | probability: {:.6e} | expected: {} attempts",
@@ -743,7 +751,27 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
     );
 
     let target_count = args.count;
+    fast::reset_grind();
     let shutdown = Arc::new(AtomicBool::new(false));
+    let grind_start = Instant::now();
+
+    // Reporter reads the shared fast-path counters (CPU + GPU both update them).
+    let reporter = {
+        let shutdown = Arc::clone(&shutdown);
+        thread::spawn(move || loop {
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            thread::sleep(Duration::from_secs(1));
+            if shutdown.load(Ordering::SeqCst) {
+                break;
+            }
+            let elapsed = grind_start.elapsed().as_secs_f64();
+            let total = fast::total_attempts();
+            let rate = total as f64 / elapsed.max(1e-9);
+            print_status(total, rate, elapsed, expected);
+        })
+    };
 
     #[cfg(feature = "gpu")]
     let gpu_thread = if args.num_gpus > 0 {
@@ -782,7 +810,7 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                     }
 
                     loop {
-                        if done(target_count) {
+                        if fast::is_done(target_count) || ABORTED.load(Ordering::Relaxed) {
                             break;
                         }
 
@@ -809,19 +837,26 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                             let pubkey_check = maybe_bs58_aware_lowercase(&pubkey_str, ci);
                             let count = u64::from_le_bytes(array::from_fn(|j| out[32 + j]));
 
-                            TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
+                            fast::add_attempts(count);
 
-                            if pubkey_check.starts_with(prefix) && pubkey_check.ends_with(suffix) {
-                                eprintln!(
-                                    "\r\x1b[Kgpu {} match: {} in {:.3}s",
-                                    i, &pubkey_str, time_sec
-                                );
-                                print_keypair_result(&found_seed, &pubkey_bytes, &pubkey_str);
-                                FOUND.fetch_add(1, Ordering::SeqCst);
+                            if pubkey_check.starts_with(prefix) && pubkey_check.ends_with(suffix)
+                            {
+                                let prev = fast::note_found();
+                                if prev < target_count {
+                                    eprintln!(
+                                        "\r\x1b[Kgpu {} match: {} in {:.3}s",
+                                        i, &pubkey_str, time_sec
+                                    );
+                                    print_keypair_result(
+                                        &found_seed,
+                                        &pubkey_bytes,
+                                        &pubkey_str,
+                                    );
+                                }
                             }
 
                             in_flight[i] = false;
-                            if !done(target_count) {
+                            if !fast::is_done(target_count) && !ABORTED.load(Ordering::Relaxed) {
                                 iterations[i] += 1;
                                 let seed = new_gpu_seed(i as u32, iterations[i]);
                                 launch_times[i] = Instant::now();
@@ -847,7 +882,7 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                                 gpu_keypair_read(ctx, out.as_mut_ptr());
                             }
                             let count = u64::from_le_bytes(array::from_fn(|j| out[32 + j]));
-                            TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
+                            fast::add_attempts(count);
                         }
                     }
                     for ctx in contexts {
@@ -862,54 +897,16 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
         None
     };
 
-    let grind_start = Instant::now();
-    let reporter = spawn_hashrate_reporter(Arc::clone(&shutdown), expected, grind_start);
+    fast::run_cpu_workers(
+        prefix,
+        suffix,
+        args.case_insensitive,
+        args.num_cpus,
+        target_count,
+    );
 
-    (0..args.num_cpus).into_par_iter().for_each(|i| {
-        let timer = Instant::now();
-        let mut local_batch = 0_u64;
-
-        loop {
-            if done(target_count) {
-                if local_batch > 0 {
-                    TOTAL_ATTEMPTS.fetch_add(local_batch, Ordering::Relaxed);
-                }
-                return;
-            }
-
-            let seed: [u8; 32] = rand::random();
-            let signing_key = SigningKey::from_bytes(&seed);
-            let pubkey_bytes = signing_key.verifying_key().to_bytes();
-            let pubkey_str = fd_bs58::encode_32(pubkey_bytes);
-
-            local_batch += 1;
-            if local_batch >= 4096 {
-                TOTAL_ATTEMPTS.fetch_add(4096, Ordering::Relaxed);
-                local_batch -= 4096;
-            }
-
-            if matches_target(&pubkey_str, prefix, suffix, args.case_insensitive) {
-                if local_batch > 0 {
-                    TOTAL_ATTEMPTS.fetch_add(local_batch, Ordering::Relaxed);
-                    local_batch = 0;
-                }
-                let time_secs = timer.elapsed().as_secs_f64();
-                let elapsed_global = grind_start.elapsed().as_secs_f64().max(1e-9);
-                let total = TOTAL_ATTEMPTS.load(Ordering::Relaxed);
-                let global_rate = total as f64 / elapsed_global;
-                eprintln!(
-                    "\r\x1b[Kcpu {i} match: {pubkey_str} in {:.3}s; {} attempts/sec",
-                    time_secs,
-                    (global_rate as u64).to_formatted_string(&Locale::en)
-                );
-                print_keypair_result(&seed, &pubkey_bytes, &pubkey_str);
-                FOUND.fetch_add(1, Ordering::SeqCst);
-                if done(target_count) {
-                    break;
-                }
-            }
-        }
-    });
+    // CPU workers finished (found enough or aborted); stop GPU too.
+    fast::request_abort();
 
     #[cfg(feature = "gpu")]
     if let Some(t) = gpu_thread {
@@ -919,7 +916,7 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
     shutdown.store(true, Ordering::SeqCst);
     reporter.join().unwrap();
 
-    let total = TOTAL_ATTEMPTS.load(Ordering::Relaxed);
+    let total = fast::total_attempts();
     let elapsed = grind_start.elapsed().as_secs_f64().max(1e-9);
     let rate = total as f64 / elapsed;
     eprintln!(
@@ -927,32 +924,6 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
         total.to_formatted_string(&Locale::en),
         format_duration(elapsed),
         (rate as u64).to_formatted_string(&Locale::en)
-    );
-}
-
-fn grind_keypair_fast(mut args: GrindKeypairArgs) {
-    maybe_update_num_cpus(&mut args.num_cpus);
-    let prefix = get_validated_bs58("prefix", &args.prefix, args.case_insensitive);
-    let suffix = get_validated_bs58("suffix", &args.suffix, args.case_insensitive);
-
-    let expected = expected_attempts(prefix, suffix, args.case_insensitive);
-    let prob = bs58_probability(prefix, suffix, args.case_insensitive);
-    eprintln!("using {} cpus (fast path)", args.num_cpus);
-    let target_label = format_target_label(prefix, suffix);
-    eprintln!(
-        "target: {} | probability: {:.6e} | expected: {} attempts",
-        target_label,
-        prob,
-        (expected as u64).to_formatted_string(&Locale::en)
-    );
-
-    fast::run_grind(
-        prefix,
-        suffix,
-        args.case_insensitive,
-        args.num_cpus,
-        args.count,
-        expected,
     );
 }
 
