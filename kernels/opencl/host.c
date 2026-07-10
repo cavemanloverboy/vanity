@@ -370,7 +370,7 @@ typedef struct {
     cl_command_queue queue;
     cl_program       program;
     cl_kernel        kernel;
-    cl_mem  seed, mlut, prefix, suffix, out, done, counts;
+    cl_mem  seed, mlut, prefix, suffix, out, done, counts, comb;
     size_t  local, global;
     uint32_t prefix_len, suffix_len;
     uint32_t max_iters;
@@ -379,6 +379,10 @@ typedef struct {
     double   launch_time;
     uint32_t *counts_host;
 } KeypairCtx;
+
+/* ge_niels = 4 fe × 10 × 4 bytes; must match OpenCL layout. */
+#define COMB_NIELS_BYTES 160u
+#define COMB_TABLE_BYTES (52u * 16u * COMB_NIELS_BYTES)
 
 void *gpu_keypair_init(int id, uint8_t *prefix, uint64_t prefix_len,
                        uint8_t *suffix, uint64_t suffix_len, bool case_insensitive) {
@@ -439,6 +443,19 @@ void *gpu_keypair_init(int id, uint8_t *prefix, uint64_t prefix_len,
     c->out    = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, 32, NULL, &err); CK(err, "buf out");
     c->done   = clCreateBuffer(c->context, CL_MEM_READ_WRITE, sizeof(cl_int), NULL, &err); CK(err, "buf done");
     c->counts = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, c->global * sizeof(cl_uint), NULL, &err); CK(err, "buf counts");
+    c->comb   = clCreateBuffer(c->context, CL_MEM_READ_WRITE, COMB_TABLE_BYTES, NULL, &err); CK(err, "buf comb");
+
+    /* Build radix-32 comb table once (single work-item). */
+    {
+        cl_kernel build = clCreateKernel(c->program, "build_comb_table", &err);
+        CK(err, "clCreateKernel(build_comb_table)");
+        CK(clSetKernelArg(build, 0, sizeof(cl_mem), &c->comb), "arg comb");
+        size_t one = 1;
+        CK(clEnqueueNDRangeKernel(c->queue, build, 1, NULL, &one, &one, 0, NULL, NULL),
+           "enqueue build_comb_table");
+        CK(clFinish(c->queue), "finish build_comb_table");
+        clReleaseKernel(build);
+    }
 
     CK(clSetKernelArg(c->kernel, 1, sizeof(cl_mem), &c->mlut), "arg mlut");
     CK(clSetKernelArg(c->kernel, 2, sizeof(cl_mem), &c->prefix), "arg prefix");
@@ -448,6 +465,7 @@ void *gpu_keypair_init(int id, uint8_t *prefix, uint64_t prefix_len,
     CK(clSetKernelArg(c->kernel, 6, sizeof(cl_mem), &c->out), "arg out");
     CK(clSetKernelArg(c->kernel, 7, sizeof(cl_mem), &c->done), "arg done");
     CK(clSetKernelArg(c->kernel, 8, sizeof(cl_mem), &c->counts), "arg counts");
+    CK(clSetKernelArg(c->kernel, 9, sizeof(cl_mem), &c->comb), "arg comb");
 
     return c;
 }
@@ -462,7 +480,7 @@ void gpu_keypair_launch(void *opaque, uint8_t *seed) {
     CK(clEnqueueWriteBuffer(c->queue, c->out, CL_FALSE, 0, 32, out_zero, 0, NULL, NULL), "clear out");
     CK(clEnqueueWriteBuffer(c->queue, c->done, CL_FALSE, 0, sizeof zero, &zero, 0, NULL, NULL), "write done");
     CK(clSetKernelArg(c->kernel, 0, sizeof(cl_mem), &c->seed), "arg seed");
-    CK(clSetKernelArg(c->kernel, 9, sizeof(cl_uint), &c->max_iters), "arg max_iters");
+    CK(clSetKernelArg(c->kernel, 10, sizeof(cl_uint), &c->max_iters), "arg max_iters");
 
     c->launch_time = now_sec();
     CK(clEnqueueNDRangeKernel(c->queue, c->kernel, 1, NULL, &c->global, &c->local, 0, NULL, &c->event),
@@ -502,7 +520,7 @@ void gpu_keypair_destroy(void *opaque) {
     KeypairCtx *c = (KeypairCtx *)opaque;
     clFinish(c->queue);
     if (c->in_flight) clReleaseEvent(c->event);
-    cl_mem bufs[] = {c->seed,c->mlut,c->prefix,c->suffix,c->out,c->done,c->counts};
+    cl_mem bufs[] = {c->seed,c->mlut,c->prefix,c->suffix,c->out,c->done,c->counts,c->comb};
     for (size_t i = 0; i < sizeof bufs / sizeof bufs[0]; ++i) clReleaseMemObject(bufs[i]);
     clReleaseKernel(c->kernel);
     clReleaseProgram(c->program);

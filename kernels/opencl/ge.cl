@@ -181,3 +181,155 @@ void ge_scalarmult_base(ge_p3 *h, const uchar *a) {
         ge_p1p1_to_p3(h, &r);
     }
 }
+
+/* ─── radix-32 comb (SIMD-style fixed-base) ─────────────────────────────── */
+
+static void ge_p3_to_niels(ge_niels *n, const ge_p3 *p, const fe d2) {
+    fe_add(n->yplusx, p->Y, p->X);
+    fe_sub(n->yminusx, p->Y, p->X);
+    fe_copy(n->z, p->Z);
+    fe_mul(n->t2d, p->T, d2);
+}
+
+static void ge_add_niels(ge_p1p1 *r, const ge_p3 *p, const ge_niels *n) {
+    fe y_plus_x, y_minus_x, pp, mm, tt2d, zz, zz2;
+    fe_add(y_plus_x, p->Y, p->X);
+    fe_sub(y_minus_x, p->Y, p->X);
+    fe_mul(pp, y_plus_x, n->yplusx);
+    fe_mul(mm, y_minus_x, n->yminusx);
+    fe_mul(tt2d, p->T, n->t2d);
+    fe_mul(zz, p->Z, n->z);
+    fe_add(zz2, zz, zz);
+    fe_sub(r->X, pp, mm);
+    fe_add(r->Y, pp, mm);
+    fe_add(r->Z, zz2, tt2d);
+    fe_sub(r->T, zz2, tt2d);
+}
+
+static void ge_niels_load(ge_niels *t, __global const ge_niels *u) {
+    for (int i = 0; i < 10; i++) {
+        t->yplusx[i] = u->yplusx[i];
+        t->yminusx[i] = u->yminusx[i];
+        t->z[i] = u->z[i];
+        t->t2d[i] = u->t2d[i];
+    }
+}
+
+static void ge_niels_store(__global ge_niels *dst, const ge_niels *src) {
+    for (int i = 0; i < 10; i++) {
+        dst->yplusx[i] = src->yplusx[i];
+        dst->yminusx[i] = src->yminusx[i];
+        dst->z[i] = src->z[i];
+        dst->t2d[i] = src->t2d[i];
+    }
+}
+
+static void ge_niels_select(ge_niels *t, __global const ge_niels *window,
+                            signed char b) {
+    uchar bnegative = negative(b);
+    uchar babs = b - (((-bnegative) & b) << 1);
+
+    if (babs == 0) {
+        fe_1(t->yplusx);
+        fe_1(t->yminusx);
+        fe_1(t->z);
+        fe_0(t->t2d);
+        return;
+    }
+
+    ge_niels_load(t, &window[babs - 1]);
+    if (bnegative) {
+        fe tmp;
+        fe_copy(tmp, t->yplusx);
+        fe_copy(t->yplusx, t->yminusx);
+        fe_copy(t->yminusx, tmp);
+        fe_neg(t->t2d, t->t2d);
+    }
+}
+
+static void to_radix32(signed char e[COMB_WINDOWS], const uchar *a) {
+    const ushort mask = (ushort)((1u << COMB_W) - 1u);
+    for (int i = 0; i < COMB_WINDOWS; i++) {
+        int bit = COMB_W * i;
+        int byte = bit / 8;
+        int off = bit % 8;
+        ushort lo = a[byte];
+        ushort hi = (byte + 1 < 32) ? a[byte + 1] : 0;
+        e[i] = (signed char)(((lo | (hi << 8)) >> off) & mask);
+    }
+    const signed char pos = (signed char)COMB_POS;
+    signed char carry = 0;
+    for (int i = 0; i < COMB_WINDOWS - 1; i++) {
+        e[i] += carry;
+        carry = (signed char)((e[i] + pos) >> COMB_W);
+        e[i] -= (signed char)(carry << COMB_W);
+    }
+    e[COMB_WINDOWS - 1] += carry;
+}
+
+void ge_scalarmult_base_comb(ge_p3 *h, const uchar *a,
+                             __global const ge_niels *table) {
+    signed char e[COMB_WINDOWS];
+    to_radix32(e, a);
+    ge_p3_0(h);
+    for (int i = 0; i < COMB_WINDOWS; i++) {
+        ge_niels t;
+        ge_p1p1 r;
+        ge_niels_select(&t, &table[i * COMB_POS], e[i]);
+        ge_add_niels(&r, h, &t);
+        ge_p1p1_to_p3(h, &r);
+    }
+}
+
+/* One-shot: build comb table[window][1..16] of 32^window * B multiples.
+   Uses ref10 ge_scalarmult_base to obtain B, then doubles by 32 between windows. */
+__kernel void build_comb_table(__global ge_niels *table) {
+    if (get_global_id(0) != 0) return;
+
+    fe d2;
+    {
+        fe t, inv, d;
+        fe_0(t);
+        t[0] = 121666;
+        fe_invert(inv, t);
+        fe_0(t);
+        t[0] = 121665;
+        fe_neg(t, t);
+        fe_mul(d, t, inv);
+        fe_add(d2, d, d);
+    }
+
+    uchar one[32];
+    for (int i = 0; i < 32; i++) one[i] = 0;
+    one[0] = 1;
+
+    ge_p3 cur;
+    ge_scalarmult_base(&cur, one); /* B */
+
+    for (int w = 0; w < COMB_WINDOWS; w++) {
+        ge_niels cur_n;
+        ge_p3_to_niels(&cur_n, &cur, d2);
+
+        ge_p3 mult;
+        fe_copy(mult.X, cur.X);
+        fe_copy(mult.Y, cur.Y);
+        fe_copy(mult.Z, cur.Z);
+        fe_copy(mult.T, cur.T);
+
+        ge_niels_store(&table[w * COMB_POS + 0], &cur_n);
+        for (int k = 1; k < COMB_POS; k++) {
+            ge_p1p1 r;
+            ge_add_niels(&r, &mult, &cur_n);
+            ge_p1p1_to_p3(&mult, &r);
+            ge_niels tmp;
+            ge_p3_to_niels(&tmp, &mult, d2);
+            ge_niels_store(&table[w * COMB_POS + k], &tmp);
+        }
+
+        for (int d = 0; d < COMB_W; d++) {
+            ge_p1p1 r;
+            ge_p3_dbl(&r, &cur);
+            ge_p1p1_to_p3(&cur, &r);
+        }
+    }
+}
