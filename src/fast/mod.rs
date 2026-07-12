@@ -294,15 +294,18 @@ pub fn request_abort() {
     GRIND_ABORT.store(true, Ordering::SeqCst);
 }
 
+#[cfg(feature = "gpu")]
 pub fn add_attempts(n: u64) {
     GRIND_TOTAL.fetch_add(n, Ordering::Relaxed);
 }
 
 /// Returns the previous found count (caller should print only if `prev < count`).
+#[cfg(feature = "gpu")]
 pub fn note_found() -> u32 {
     GRIND_FOUND.fetch_add(1, Ordering::SeqCst)
 }
 
+#[cfg(feature = "gpu")]
 pub fn is_done(count: u32) -> bool {
     grind_done(count)
 }
