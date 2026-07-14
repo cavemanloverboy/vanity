@@ -31,8 +31,8 @@ typedef struct {
 
 extern "C" void* gpu_keypair_init(
     int id,
-    uint8_t *prefix, uint64_t prefix_len,
-    uint8_t *suffix, uint64_t suffix_len,
+    uint8_t *prefixes, uint64_t prefix_count,
+    uint8_t *suffixes, uint64_t suffix_count,
     bool case_insensitive)
 {
     cudaSetDevice(id);
@@ -62,9 +62,11 @@ extern "C" void* gpu_keypair_init(
 
     cudaStreamCreate(&ctx->stream);
 
-    // Buffer: [seed:32] [prefix_len:8] [prefix:N] [suffix_len:8] [suffix:M] [out:32]
-    uint64_t buf_size = 32 + 8 + prefix_len + 8 + suffix_len + 32;
-    ctx->out_offset = 32 + 8 + prefix_len + 8 + suffix_len;
+    uint64_t prefix_bytes = VANITY_MATCH_PLAN_WORDS * sizeof(uint32_t);
+    uint64_t suffix_bytes = VANITY_MATCH_PLAN_WORDS * sizeof(uint32_t);
+    // Buffer: [seed:32] [prefix_count:8] [prefixes] [suffix_count:8] [suffixes] [out:32]
+    uint64_t buf_size = 32 + 8 + prefix_bytes + 8 + suffix_bytes + 32;
+    ctx->out_offset = 32 + 8 + prefix_bytes + 8 + suffix_bytes;
 
     err = cudaMalloc((void**)&ctx->d_buffer, buf_size);
     if (err != cudaSuccess) {
@@ -72,7 +74,7 @@ extern "C" void* gpu_keypair_init(
         exit(EXIT_FAILURE);
     }
 
-    /* Canonical base58 match indices + LUT (same scheme as gpu_grind_init). */
+    /* Canonical base58 LUT; match plans arrive precomputed by the Rust host. */
     {
         static const char alphabet_normal[59] =
             "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -91,29 +93,12 @@ extern "C" void* gpu_keypair_init(
             }
         }
 
-        uint8_t prefix_idx[64];
-        uint8_t suffix_idx[64];
-        for (uint64_t i = 0; i < prefix_len; ++i) {
-            uint8_t v = 255;
-            for (int k = 0; k < 58; ++k) {
-                if ((uint8_t)alphabet[k] == prefix[i]) { v = host_match_lut[k]; break; }
-            }
-            prefix_idx[i] = v;
-        }
-        for (uint64_t i = 0; i < suffix_len; ++i) {
-            uint8_t v = 255;
-            for (int k = 0; k < 58; ++k) {
-                if ((uint8_t)alphabet[k] == suffix[i]) { v = host_match_lut[k]; break; }
-            }
-            suffix_idx[i] = v;
-        }
-
         uint64_t off = 32;
-        cudaMemcpy(ctx->d_buffer + off, &prefix_len, 8, cudaMemcpyHostToDevice); off += 8;
-        if (prefix_len > 0) cudaMemcpy(ctx->d_buffer + off, prefix_idx, prefix_len, cudaMemcpyHostToDevice);
-        off += prefix_len;
-        cudaMemcpy(ctx->d_buffer + off, &suffix_len, 8, cudaMemcpyHostToDevice); off += 8;
-        if (suffix_len > 0) cudaMemcpy(ctx->d_buffer + off, suffix_idx, suffix_len, cudaMemcpyHostToDevice);
+        cudaMemcpy(ctx->d_buffer + off, &prefix_count, 8, cudaMemcpyHostToDevice); off += 8;
+        cudaMemcpy(ctx->d_buffer + off, prefixes, prefix_bytes, cudaMemcpyHostToDevice);
+        off += prefix_bytes;
+        cudaMemcpy(ctx->d_buffer + off, &suffix_count, 8, cudaMemcpyHostToDevice); off += 8;
+        cudaMemcpy(ctx->d_buffer + off, suffixes, suffix_bytes, cudaMemcpyHostToDevice);
 
         cudaMemcpyToSymbol(d_match_lut, host_match_lut, sizeof(host_match_lut));
     }
@@ -176,22 +161,24 @@ extern "C" void gpu_keypair_destroy(void *opaque)
     free(ctx);
 }
 
-// ─── kernel (unchanged) ─────────────────────────────────────────────────────
+// ─── kernel ─────────────────────────────────────────────────────────────────
 
 static __global__ void __launch_bounds__(KP_MAX_THREADS)
 vanity_keypair_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
 {
     uint8_t *host_seed = buffer;
 
-    uint64_t prefix_len;
-    memcpy(&prefix_len, buffer + 32, 8);
-    uint8_t *prefix = buffer + 40;
+    uint64_t prefix_count;
+    memcpy(&prefix_count, buffer + 32, 8);
+    uint8_t *prefixes = buffer + 40;
+    uint64_t prefix_bytes = VANITY_MATCH_PLAN_WORDS * sizeof(uint32_t);
 
-    uint64_t suffix_len;
-    memcpy(&suffix_len, buffer + 40 + prefix_len, 8);
-    uint8_t *suffix = buffer + 40 + prefix_len + 8;
+    uint64_t suffix_count;
+    memcpy(&suffix_count, buffer + 40 + prefix_bytes, 8);
+    uint8_t *suffixes = buffer + 40 + prefix_bytes + 8;
+    uint64_t suffix_bytes = VANITY_MATCH_PLAN_WORDS * sizeof(uint32_t);
 
-    uint8_t *out = suffix + suffix_len;
+    uint8_t *out = suffixes + suffix_bytes;
 
     uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -233,7 +220,7 @@ vanity_keypair_search(uint8_t *buffer, uint64_t stride, unsigned long long max_c
         md.state[6] = UINT64_C(0x1f83d9abfb41bd6b);
         md.state[7] = UINT64_C(0x5be0cd19137e2179);
 
-        #pragma unroll
+#pragma unroll
         for (int i = 0; i < 32; i++) {
             md.buf[i] = seed[i];
         }
@@ -257,7 +244,7 @@ vanity_keypair_search(uint8_t *buffer, uint64_t stride, unsigned long long max_c
                             | ((uint)pubkey[4*k + 3]      );
         }
 
-        if (fd_base58_check_match_32_words(pubkey_words, prefix, prefix_len, suffix, suffix_len))
+        if (fd_base58_check_match_32_words(pubkey_words, prefixes, prefix_count, suffixes, suffix_count))
         {
             if (atomicMax(&kp_done, 1) == 0) {
                 memcpy(out, seed, 32);
