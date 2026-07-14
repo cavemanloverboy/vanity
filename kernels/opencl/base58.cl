@@ -73,15 +73,19 @@ static ulong fd_base58_encode_32(const uchar *bytes, uchar *out, bool case_insen
     return encoded_length;
 }
 
+#define VANITY_MATCH_PLAN_WORDS (1UL + 44UL * 58UL + 44UL)
+
 /* Word-form fused base58 encode + prefix/suffix match with early rejection.
    `state[8]` is the SHA-256 digest as 8 native words (MSB-first); the two
-   byte-swaps cancel so binary[i] == state[i]. `target`/`suffix` are arrays
-   of canonical raw_base58 indices precomputed on the host; match_lut folds
-   raw_base58 values into the same canonical space. */
+   byte-swaps cancel so binary[i] == state[i]. Prefix and suffix plans contain
+   candidate bitmasks precomputed on the host; match_lut folds raw values into
+   the same canonical space. */
 static bool fd_base58_check_match_32_words(const uint state[8],
-                                           __global const uchar *target, ulong target_len,
-                                           __global const uchar *suffix, ulong suffix_len,
+                                           __global const uchar *prefixes, ulong prefix_count,
+                                           __global const uchar *suffixes, ulong suffix_count,
                                            __constant const uchar *match_lut) {
+    (void)prefix_count;
+    (void)suffix_count;
     /* Count leading zero bytes of the big-endian byte view of state[]. */
     ulong in_leading_0s = 0UL;
     for (int i = 0; i < 8; ++i) {
@@ -129,21 +133,40 @@ static bool fd_base58_check_match_32_words(const uint state[8],
     ulong skip = raw_leading_0s - in_leading_0s;
     ulong encoded_length = 45UL - skip;
 
-    for (ulong i = 0UL; i < target_len; i++) {
-        ulong rb_idx = skip + i;
-        VANITY_BS58_ENSURE_LIMB(rb_idx / 5UL);
-        if (match_lut[raw_base58[rb_idx]] != target[i])
-            return false;
-    }
-
-    if (suffix_len > 0UL) {
-        ulong tail_start = skip + encoded_length - suffix_len;
-        ulong last_limb = (skip + encoded_length - 1UL) / 5UL;
-        VANITY_BS58_ENSURE_LIMB(last_limb);
-        for (ulong i = 0UL; i < suffix_len; i++) {
-            if (match_lut[raw_base58[tail_start + i]] != suffix[i])
-                return false;
+    __global const uint *prefix_plan = (__global const uint *)prefixes;
+    __global const uint *suffix_plan = (__global const uint *)suffixes;
+    uint candidates = prefix_plan[0];
+    if (candidates != 0U) {
+        for (uint position = 0U;
+             position < 44U && position < (uint)encoded_length;
+             position++) {
+            uint rb_idx = (uint)skip + position;
+            VANITY_BS58_ENSURE_LIMB((ulong)rb_idx / 5UL);
+            candidates &= prefix_plan[
+                1U + position * 58U
+                + (uint)match_lut[raw_base58[rb_idx]]];
+            if (candidates & prefix_plan[1U + 44U * 58U + position])
+                goto prefix_matched;
+            if (candidates == 0U) return false;
         }
+        return false;
+    }
+prefix_matched:
+    candidates = suffix_plan[0];
+    if (candidates != 0U) {
+        for (uint position = 0U;
+             position < 44U && position < (uint)encoded_length;
+             position++) {
+            uint rb_idx = (uint)(skip + encoded_length - 1UL) - position;
+            VANITY_BS58_ENSURE_LIMB((ulong)rb_idx / 5UL);
+            candidates &= suffix_plan[
+                1U + position * 58U
+                + (uint)match_lut[raw_base58[rb_idx]]];
+            if (candidates & suffix_plan[1U + 44U * 58U + position])
+                return true;
+            if (candidates == 0U) return false;
+        }
+        return false;
     }
 
     return true;

@@ -326,13 +326,13 @@ pub fn backend_name() -> &'static str {
 /// Call [`reset_grind`] first if coordinating with a GPU thread that shares
 /// these counters via [`add_attempts`] / [`note_found`] / [`is_done`].
 pub fn run_cpu_workers(
-    prefix: &'static str,
-    suffix: &'static str,
+    prefixes: &[String],
+    suffixes: &[String],
     case_insensitive: bool,
     num_cpus: u32,
     count: u32,
 ) {
-    let target = MatchTarget::new(prefix, suffix, case_insensitive);
+    let target = MatchTarget::new(prefixes, suffixes, case_insensitive);
 
     (0..num_cpus).into_par_iter().for_each(|_| {
         #[cfg(target_arch = "x86_64")]

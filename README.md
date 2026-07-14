@@ -59,7 +59,8 @@ No ed25519 is involved, so it's dramatically faster — but the account is
 controlled by `base` (the signer), not by a standalone keypair.
 
 You supply the `--base` pubkey (the signer for the create instruction), the
-program `--owner`, and a `--prefix` and/or `--suffix` to match (base58):
+program `--owner`, and one or more `--prefix` and/or `--suffix` values to
+match (base58):
 
 ```bash
 vanity grind \
@@ -111,7 +112,10 @@ path uses a batched custom ed25519 implementation (AVX-512 IFMA when available);
 GPUs use the CUDA/OpenCL keypair kernels.
 
 ```bash
-vanity grind-keypair --prefix bob --suffix xyz --num-gpus 1
+vanity grind-keypair \
+  --prefix sun,moon,mint \
+  --suffix key \
+  --num-gpus 1
 ```
 
 On a match it prints the public key, the seed (hex), and a Solana-compatible
@@ -126,6 +130,23 @@ keypair json (solana-compatible): [104, 227, 111, ...]
 
 Add `--case-insensitive` to match the prefix/suffix ignoring case (except `L`,
 which has no lowercase form in base58).
+
+Multiple values use OR within each flag and AND between the two flags. For
+example, the command above matches a public key that starts with `sun`, `moon`,
+or `mint` and ends with `key`. Values can be comma-separated or supplied by
+repeating a flag; these commands are equivalent:
+
+```bash
+vanity grind-keypair --prefix sun,moon,mint --suffix key
+vanity grind-keypair --prefix sun --prefix moon --prefix mint --suffix key
+```
+
+The same syntax is supported by `grind`. Existing single-value commands remain
+unchanged.
+
+CUDA and OpenCL searches accept up to 32 non-redundant values per flag. CPU-only
+searches do not have this limit. Duplicate targets and targets covered by a
+shorter alternative are removed automatically before the search starts.
 
 ### Grind a doppler keypair
 
@@ -177,7 +198,7 @@ doppler: 1/4 sign-extendable segment(s)
 | `--num-gpus <N>` | all (GPU builds only) | `1` | GPUs to mine on |
 | `--count <N>` | all | `1` | stop after finding N matches |
 | `--case-insensitive` | `grind`, `grind-keypair` | off | match prefix/suffix ignoring case |
-| `--prefix` / `--suffix` | `grind`, `grind-keypair` | — | base58 target(s) to match; supply at least one |
+| `--prefix` / `--suffix` | `grind`, `grind-keypair` | — | base58 targets to match; repeat or separate with commas; supply at least one |
 | `--segments <1-4>` | `grind-doppler` | `1` | sign-extendable segments required |
 
 To run purely on CPU (no GPU), build without a GPU feature, or pass `--num-gpus 0`.
