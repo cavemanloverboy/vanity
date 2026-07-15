@@ -120,7 +120,7 @@ static cl_program build_program(cl_context ctx, cl_device_id dev,
     cl_int err;
     cl_program prog = clCreateProgramWithSource(ctx, n, srcs, lens, &err);
     CK(err, "clCreateProgramWithSource");
-    err = clBuildProgram(prog, 1, &dev, "", NULL, NULL);
+    err = clBuildProgram(prog, 1, &dev, "-cl-std=CL1.2", NULL, NULL);
     if (err != CL_SUCCESS) {
         size_t log_sz = 0;
         clGetProgramBuildInfo(prog, dev, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_sz);
@@ -154,6 +154,8 @@ static cl_mem buf_copy(cl_context ctx, size_t sz, const void *host) {
     return m;
 }
 
+#define MATCH_PLAN_BYTES ((1u + 44u * 58u + 44u) * sizeof(uint32_t))
+
 /* Grow/shrink max_iters toward TARGET_LAUNCH_SEC based on last launch time. */
 static uint32_t adapt_iters(uint32_t cur, double elapsed, uint32_t lo, uint32_t hi) {
     if (elapsed <= 1e-6) return hi;
@@ -173,9 +175,9 @@ typedef struct {
     cl_command_queue queue;
     cl_program       program;
     cl_kernel        kernel;
-    cl_mem  seed, w0, sr7, w1, glyph, mlut, target, suffix, out, done, counts;
+    cl_mem  seed, w0, sr7, w1, glyph, mlut, prefix, suffix, out, done, counts;
     size_t  local, global;
-    uint32_t target_len, suffix_len;
+    uint32_t prefix_count, suffix_count;
     uint32_t max_iters;
     cl_event event;
     int      in_flight;
@@ -184,8 +186,8 @@ typedef struct {
 } GrindCtx;
 
 void *gpu_grind_init(int id, uint8_t *base, uint8_t *owner,
-                     uint8_t *target, uint64_t target_len,
-                     uint8_t *suffix, uint64_t suffix_len,
+                     uint8_t *prefixes, uint64_t prefix_count,
+                     uint8_t *suffixes, uint64_t suffix_count,
                      bool case_insensitive) {
     cl_platform_id plat;
     cl_device_id dev = select_device(id, &plat);
@@ -204,12 +206,12 @@ void *gpu_grind_init(int id, uint8_t *base, uint8_t *owner,
 
     c->local  = clamp_local(dev, GRIND_LOCAL);
     c->global = (size_t)compute_units(dev) * GRIND_WAVES * c->local;
-    c->target_len = (uint32_t)target_len;
-    c->suffix_len = (uint32_t)suffix_len;
+    c->prefix_count = (uint32_t)prefix_count;
+    c->suffix_count = (uint32_t)suffix_count;
     c->max_iters  = GRIND_ITERS_INIT;
     c->counts_host = (uint32_t *)malloc(c->global * sizeof(uint32_t));
 
-    /* Canonicalizing LUT + ASCII target/suffix -> canonical raw_base58 idx. */
+    /* Canonicalizing LUT; match plans arrive precomputed by the Rust host. */
     static const char alphabet_normal[59] =
         "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     static const char alphabet_ci[59] =
@@ -221,19 +223,6 @@ void *gpu_grind_init(int id, uint8_t *base, uint8_t *owner,
         match_lut[i] = (uint8_t)i;
         for (int j = 0; j < i; ++j)
             if (alphabet[j] == alphabet[i]) { match_lut[i] = (uint8_t)j; break; }
-    }
-    uint8_t target_idx[64], suffix_idx[64];
-    for (uint64_t i = 0; i < target_len; ++i) {
-        uint8_t v = 255;
-        for (int k = 0; k < 58; ++k)
-            if ((uint8_t)alphabet[k] == target[i]) { v = match_lut[k]; break; }
-        target_idx[i] = v;
-    }
-    for (uint64_t i = 0; i < suffix_len; ++i) {
-        uint8_t v = 255;
-        for (int k = 0; k < 58; ++k)
-            if ((uint8_t)alphabet[k] == suffix[i]) { v = match_lut[k]; break; }
-        suffix_idx[i] = v;
     }
 
     /* SHA-256 block-1 schedule from owner[16..32] (loop invariant). */
@@ -280,8 +269,8 @@ void *gpu_grind_init(int id, uint8_t *base, uint8_t *owner,
     c->w1     = buf_copy(c->context, sizeof W1, W1);
     c->glyph  = buf_copy(c->context, sizeof glyph, glyph);
     c->mlut   = buf_copy(c->context, sizeof match_lut, match_lut);
-    c->target = buf_copy(c->context, target_len, target_idx);
-    c->suffix = buf_copy(c->context, suffix_len, suffix_idx);
+    c->prefix = buf_copy(c->context, MATCH_PLAN_BYTES, prefixes);
+    c->suffix = buf_copy(c->context, MATCH_PLAN_BYTES, suffixes);
     c->out    = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, 16, NULL, &err); CK(err, "buf out");
     c->done   = clCreateBuffer(c->context, CL_MEM_READ_WRITE, sizeof(cl_int), NULL, &err); CK(err, "buf done");
     c->counts = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, c->global * sizeof(cl_uint), NULL, &err); CK(err, "buf counts");
@@ -292,10 +281,10 @@ void *gpu_grind_init(int id, uint8_t *base, uint8_t *owner,
     CK(clSetKernelArg(c->kernel, 3, sizeof(cl_mem), &c->w1),     "arg w1");
     CK(clSetKernelArg(c->kernel, 4, sizeof(cl_mem), &c->glyph),  "arg glyph");
     CK(clSetKernelArg(c->kernel, 5, sizeof(cl_mem), &c->mlut),   "arg mlut");
-    CK(clSetKernelArg(c->kernel, 6, sizeof(cl_mem), &c->target), "arg target");
-    CK(clSetKernelArg(c->kernel, 7, sizeof(cl_uint), &c->target_len), "arg target_len");
+    CK(clSetKernelArg(c->kernel, 6, sizeof(cl_mem), &c->prefix), "arg prefix");
+    CK(clSetKernelArg(c->kernel, 7, sizeof(cl_uint), &c->prefix_count), "arg prefix_count");
     CK(clSetKernelArg(c->kernel, 8, sizeof(cl_mem), &c->suffix), "arg suffix");
-    CK(clSetKernelArg(c->kernel, 9, sizeof(cl_uint), &c->suffix_len), "arg suffix_len");
+    CK(clSetKernelArg(c->kernel, 9, sizeof(cl_uint), &c->suffix_count), "arg suffix_count");
     CK(clSetKernelArg(c->kernel, 10, sizeof(cl_mem), &c->out),   "arg out");
     CK(clSetKernelArg(c->kernel, 11, sizeof(cl_mem), &c->done),  "arg done");
     CK(clSetKernelArg(c->kernel, 12, sizeof(cl_mem), &c->counts),"arg counts");
@@ -353,7 +342,7 @@ void gpu_grind_destroy(void *opaque) {
     GrindCtx *c = (GrindCtx *)opaque;
     clFinish(c->queue);
     if (c->in_flight) clReleaseEvent(c->event);
-    cl_mem bufs[] = {c->seed,c->w0,c->sr7,c->w1,c->glyph,c->mlut,c->target,c->suffix,c->out,c->done,c->counts};
+    cl_mem bufs[] = {c->seed,c->w0,c->sr7,c->w1,c->glyph,c->mlut,c->prefix,c->suffix,c->out,c->done,c->counts};
     for (size_t i = 0; i < sizeof bufs / sizeof bufs[0]; ++i) clReleaseMemObject(bufs[i]);
     clReleaseKernel(c->kernel);
     clReleaseProgram(c->program);
@@ -372,7 +361,7 @@ typedef struct {
     cl_kernel        kernel;
     cl_mem  seed, mlut, prefix, suffix, out, done, counts, comb;
     size_t  local, global;
-    uint32_t prefix_len, suffix_len;
+    uint32_t prefix_count, suffix_count;
     uint32_t max_iters;
     cl_event event;
     int      in_flight;
@@ -384,8 +373,8 @@ typedef struct {
 #define COMB_NIELS_BYTES 160u
 #define COMB_TABLE_BYTES (52u * 16u * COMB_NIELS_BYTES)
 
-void *gpu_keypair_init(int id, uint8_t *prefix, uint64_t prefix_len,
-                       uint8_t *suffix, uint64_t suffix_len, bool case_insensitive) {
+void *gpu_keypair_init(int id, uint8_t *prefixes, uint64_t prefix_count,
+                       uint8_t *suffixes, uint64_t suffix_count, bool case_insensitive) {
     cl_platform_id plat;
     cl_device_id dev = select_device(id, &plat);
     cl_int err;
@@ -403,13 +392,13 @@ void *gpu_keypair_init(int id, uint8_t *prefix, uint64_t prefix_len,
 
     c->local  = clamp_local(dev, KP_LOCAL);
     c->global = (size_t)compute_units(dev) * KP_WAVES * c->local;
-    c->prefix_len = (uint32_t)prefix_len;
-    c->suffix_len = (uint32_t)suffix_len;
+    c->prefix_count = (uint32_t)prefix_count;
+    c->suffix_count = (uint32_t)suffix_count;
     c->max_iters = KP_ITERS_INIT;
     c->counts_host = (uint32_t *)malloc(c->global * sizeof(uint32_t));
 
-    /* Canonical base58 match indices + LUT (same scheme as gpu_grind_init /
-       CUDA gpu_keypair_init). Case folding lives in the LUT / indices. */
+    /* Canonical base58 LUT (same scheme as gpu_grind_init / CUDA
+       gpu_keypair_init). Match plans arrive precomputed by the Rust host. */
     static const char alphabet_normal[59] =
         "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     static const char alphabet_ci[59] =
@@ -422,24 +411,10 @@ void *gpu_keypair_init(int id, uint8_t *prefix, uint64_t prefix_len,
         for (int j = 0; j < i; ++j)
             if (alphabet[j] == alphabet[i]) { match_lut[i] = (uint8_t)j; break; }
     }
-    uint8_t prefix_idx[64], suffix_idx[64];
-    for (uint64_t i = 0; i < prefix_len; ++i) {
-        uint8_t v = 255;
-        for (int k = 0; k < 58; ++k)
-            if ((uint8_t)alphabet[k] == prefix[i]) { v = match_lut[k]; break; }
-        prefix_idx[i] = v;
-    }
-    for (uint64_t i = 0; i < suffix_len; ++i) {
-        uint8_t v = 255;
-        for (int k = 0; k < 58; ++k)
-            if ((uint8_t)alphabet[k] == suffix[i]) { v = match_lut[k]; break; }
-        suffix_idx[i] = v;
-    }
-
     c->seed   = clCreateBuffer(c->context, CL_MEM_READ_ONLY, 32, NULL, &err); CK(err, "buf seed");
     c->mlut   = buf_copy(c->context, sizeof match_lut, match_lut);
-    c->prefix = buf_copy(c->context, prefix_len, prefix_idx);
-    c->suffix = buf_copy(c->context, suffix_len, suffix_idx);
+    c->prefix = buf_copy(c->context, MATCH_PLAN_BYTES, prefixes);
+    c->suffix = buf_copy(c->context, MATCH_PLAN_BYTES, suffixes);
     c->out    = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, 32, NULL, &err); CK(err, "buf out");
     c->done   = clCreateBuffer(c->context, CL_MEM_READ_WRITE, sizeof(cl_int), NULL, &err); CK(err, "buf done");
     c->counts = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, c->global * sizeof(cl_uint), NULL, &err); CK(err, "buf counts");
@@ -459,9 +434,9 @@ void *gpu_keypair_init(int id, uint8_t *prefix, uint64_t prefix_len,
 
     CK(clSetKernelArg(c->kernel, 1, sizeof(cl_mem), &c->mlut), "arg mlut");
     CK(clSetKernelArg(c->kernel, 2, sizeof(cl_mem), &c->prefix), "arg prefix");
-    CK(clSetKernelArg(c->kernel, 3, sizeof(cl_uint), &c->prefix_len), "arg prefix_len");
+    CK(clSetKernelArg(c->kernel, 3, sizeof(cl_uint), &c->prefix_count), "arg prefix_count");
     CK(clSetKernelArg(c->kernel, 4, sizeof(cl_mem), &c->suffix), "arg suffix");
-    CK(clSetKernelArg(c->kernel, 5, sizeof(cl_uint), &c->suffix_len), "arg suffix_len");
+    CK(clSetKernelArg(c->kernel, 5, sizeof(cl_uint), &c->suffix_count), "arg suffix_count");
     CK(clSetKernelArg(c->kernel, 6, sizeof(cl_mem), &c->out), "arg out");
     CK(clSetKernelArg(c->kernel, 7, sizeof(cl_mem), &c->done), "arg done");
     CK(clSetKernelArg(c->kernel, 8, sizeof(cl_mem), &c->counts), "arg counts");

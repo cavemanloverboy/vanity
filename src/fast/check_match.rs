@@ -49,18 +49,21 @@ pub fn match_lut(case_insensitive: bool) -> &'static [u8; 58] {
     }
 }
 
+struct Pattern {
+    indices: [u8; MAX_PATTERN_LEN],
+    len: u8,
+}
+
 pub struct MatchTarget {
-    prefix_idx: [u8; MAX_PATTERN_LEN],
-    prefix_len: u8,
-    suffix_idx: [u8; MAX_PATTERN_LEN],
-    suffix_len: u8,
+    prefixes: Vec<Pattern>,
+    suffixes: Vec<Pattern>,
     match_lut: &'static [u8; 58],
 }
 
 impl MatchTarget {
     pub fn new(
-        prefix: &str,
-        suffix: &str,
+        prefixes: &[String],
+        suffixes: &[String],
         case_insensitive: bool,
     ) -> Self {
         let alphabet = if case_insensitive {
@@ -70,23 +73,21 @@ impl MatchTarget {
         };
         let lut = match_lut(case_insensitive);
 
-        let mut prefix_idx = [0u8; MAX_PATTERN_LEN];
-        debug_assert!(prefix.len() <= MAX_PATTERN_LEN);
-        for (i, &b) in prefix.as_bytes().iter().enumerate() {
-            prefix_idx[i] = char_to_canonical(b, alphabet, lut);
-        }
-
-        let mut suffix_idx = [0u8; MAX_PATTERN_LEN];
-        debug_assert!(suffix.len() <= MAX_PATTERN_LEN);
-        for (i, &b) in suffix.as_bytes().iter().enumerate() {
-            suffix_idx[i] = char_to_canonical(b, alphabet, lut);
-        }
+        let encode = |pattern: &String| {
+            let mut indices = [0u8; MAX_PATTERN_LEN];
+            debug_assert!(pattern.len() <= MAX_PATTERN_LEN);
+            for (i, &byte) in pattern.as_bytes().iter().enumerate() {
+                indices[i] = char_to_canonical(byte, alphabet, lut);
+            }
+            Pattern {
+                indices,
+                len: pattern.len() as u8,
+            }
+        };
 
         Self {
-            prefix_idx,
-            prefix_len: prefix.len() as u8,
-            suffix_idx,
-            suffix_len: suffix.len() as u8,
+            prefixes: prefixes.iter().map(encode).collect(),
+            suffixes: suffixes.iter().map(encode).collect(),
             match_lut: lut,
         }
     }
@@ -95,11 +96,9 @@ impl MatchTarget {
     pub fn matches(&self, bytes: &[u8; 32]) -> bool {
         check_match_32(
             bytes,
-            &self.prefix_idx,
-            self.prefix_len,
-            &self.suffix_idx,
-            self.suffix_len,
-            &self.match_lut,
+            &self.prefixes,
+            &self.suffixes,
+            self.match_lut,
         )
     }
 }
@@ -148,10 +147,8 @@ fn ensure_limb(
 #[inline]
 fn check_match_32(
     bytes: &[u8; 32],
-    prefix_idx: &[u8; MAX_PATTERN_LEN],
-    prefix_len: u8,
-    suffix_idx: &[u8; MAX_PATTERN_LEN],
-    suffix_len: u8,
+    prefixes: &[Pattern],
+    suffixes: &[Pattern],
     match_lut: &[u8; 58],
 ) -> bool {
     let mut in_leading_0s = 0usize;
@@ -160,9 +157,9 @@ fn check_match_32(
     }
 
     let mut binary = [0u32; BINARY_SZ_32];
-    for i in 0..BINARY_SZ_32 {
+    for (i, word) in binary.iter_mut().enumerate() {
         let o = i * 4;
-        binary[i] = u32::from_be_bytes([
+        *word = u32::from_be_bytes([
             bytes[o],
             bytes[o + 1],
             bytes[o + 2],
@@ -205,23 +202,40 @@ fn check_match_32(
     let skip = raw_leading_0s - in_leading_0s;
     let encoded_length = RAW58_SZ_32 - skip;
 
-    for i in 0..prefix_len as usize {
-        let target = prefix_idx[i];
-        let rb_idx = skip + i;
-        ensure_limb(
-            &intermediate,
-            &mut raw_base58,
-            &mut limbs_done,
-            rb_idx / 5,
-        );
-        if match_lut[raw_base58[rb_idx] as usize] != target {
+    if !prefixes.is_empty() {
+        let mut any_prefix = false;
+        for pattern in prefixes {
+            let pattern_len = pattern.len as usize;
+            if pattern_len > encoded_length {
+                continue;
+            }
+            let mut matched = true;
+            for i in 0..pattern_len {
+                let rb_idx = skip + i;
+                ensure_limb(
+                    &intermediate,
+                    &mut raw_base58,
+                    &mut limbs_done,
+                    rb_idx / 5,
+                );
+                if match_lut[raw_base58[rb_idx] as usize]
+                    != pattern.indices[i]
+                {
+                    matched = false;
+                    break;
+                }
+            }
+            if matched {
+                any_prefix = true;
+                break;
+            }
+        }
+        if !any_prefix {
             return false;
         }
     }
 
-    if suffix_len > 0 {
-        let suffix_len = suffix_len as usize;
-        let tail_start = skip + encoded_length - suffix_len;
+    if !suffixes.is_empty() {
         let last_limb = (skip + encoded_length - 1) / 5;
         ensure_limb(
             &intermediate,
@@ -229,12 +243,29 @@ fn check_match_32(
             &mut limbs_done,
             last_limb,
         );
-        for i in 0..suffix_len {
-            let target = suffix_idx[i];
-            if match_lut[raw_base58[tail_start + i] as usize] != target
-            {
-                return false;
+        let mut any_suffix = false;
+        for pattern in suffixes {
+            let pattern_len = pattern.len as usize;
+            if pattern_len > encoded_length {
+                continue;
             }
+            let tail_start = skip + encoded_length - pattern_len;
+            let mut matched = true;
+            for i in 0..pattern_len {
+                if match_lut[raw_base58[tail_start + i] as usize]
+                    != pattern.indices[i]
+                {
+                    matched = false;
+                    break;
+                }
+            }
+            if matched {
+                any_suffix = true;
+                break;
+            }
+        }
+        if !any_suffix {
+            return false;
         }
     }
 
@@ -275,7 +306,11 @@ mod tests {
 
     #[test]
     fn agrees_with_full_encode_random() {
-        let target = MatchTarget::new("zz", "LM", false);
+        let target = MatchTarget::new(
+            &["zz".to_string()],
+            &["LM".to_string()],
+            false,
+        );
         for i in 0u32..5000 {
             let h: [u8; 64] = Sha512::digest(i.to_le_bytes()).into();
             let seed: [u8; 32] = h[..32].try_into().unwrap();
@@ -290,7 +325,7 @@ mod tests {
 
     #[test]
     fn agrees_with_full_encode_ci() {
-        let target = MatchTarget::new("mithriL", "", true);
+        let target = MatchTarget::new(&["mithriL".to_string()], &[], true);
         for i in 0u32..2000 {
             let h: [u8; 64] =
                 Sha512::digest((i ^ 0xdeadbeef).to_le_bytes()).into();
@@ -315,8 +350,43 @@ mod tests {
             let bytes = fd_bs58::decode_32(key).unwrap();
             let prefix = &key[..key.len().min(3)];
             let suffix = &key[key.len().saturating_sub(2)..];
-            let target = MatchTarget::new(prefix, suffix, false);
+            let target = MatchTarget::new(
+                &[prefix.to_string()],
+                &[suffix.to_string()],
+                false,
+            );
             assert!(target.matches(&bytes), "{key}");
         }
+    }
+
+    #[test]
+    fn matches_any_prefix_and_any_suffix() {
+        let key = "XkCriyrNwS3G4rzAXtG5B1nnvb5Ka1JtCku93VqeKAr";
+        let bytes = fd_bs58::decode_32(key).unwrap();
+        let target = MatchTarget::new(
+            &["sun".to_string(), "XkC".to_string()],
+            &["mint".to_string(), "KAr".to_string()],
+            false,
+        );
+        assert!(target.matches(&bytes));
+
+        let wrong_suffix = MatchTarget::new(
+            &["sun".to_string(), "XkC".to_string()],
+            &["mint".to_string(), "moon".to_string()],
+            false,
+        );
+        assert!(!wrong_suffix.matches(&bytes));
+    }
+
+    #[test]
+    fn matches_multiple_case_insensitive_patterns() {
+        let key = "XkCriyrNwS3G4rzAXtG5B1nnvb5Ka1JtCku93VqeKAr";
+        let bytes = fd_bs58::decode_32(key).unwrap();
+        let target = MatchTarget::new(
+            &["sun".to_string(), "xkc".to_string()],
+            &["mint".to_string(), "kar".to_string()],
+            true,
+        );
+        assert!(target.matches(&bytes));
     }
 }

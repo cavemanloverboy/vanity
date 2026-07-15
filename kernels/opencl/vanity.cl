@@ -79,8 +79,8 @@ __kernel void vanity_search(
     __constant const WORD *W1,           /* 64 */
     __constant const uchar *glyph,       /* 256 */
     __constant const uchar *match_lut,   /* 58 */
-    __global const uchar *target, uint target_len,
-    __global const uchar *suffix, uint suffix_len,
+    __global const uchar *prefixes, uint prefix_count,
+    __global const uchar *suffixes, uint suffix_count,
     __global uchar *out,                 /* 16 bytes: matched seed16 */
     __global volatile int *done,
     __global uint *counts,
@@ -122,8 +122,8 @@ __kernel void vanity_search(
 
         vanity_pubkey_sha256_words(seed_words, digest_words, W0_fixed, state_r7, W1);
 
-        if (fd_base58_check_match_32_words(digest_words, target, target_len,
-                                           suffix, suffix_len, match_lut)) {
+        if (fd_base58_check_match_32_words(digest_words, prefixes, prefix_count,
+                                           suffixes, suffix_count, match_lut)) {
             if (atomic_cmpxchg(done, 0, 1) == 0) {
                 for (int k = 0; k < 4; ++k) {
                     WORD w = seed_words[k];

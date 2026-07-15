@@ -5,7 +5,6 @@ use ed25519_dalek::SigningKey;
 use num_bigint::BigUint;
 use num_format::{Locale, ToFormattedString};
 use num_traits::{One, ToPrimitive, Zero};
-use rand;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use sha2::{Digest, Sha256};
 use solana_pubkey::Pubkey;
@@ -47,6 +46,12 @@ pub enum Command {
 }
 
 #[derive(Debug, Parser)]
+#[command(group(
+    clap::ArgGroup::new("target")
+        .required(true)
+        .multiple(true)
+        .args(["prefix", "suffix"])
+))]
 pub struct GrindArgs {
     /// The pubkey that will be the signer for the CreateAccountWithSeed instruction
     #[clap(long, value_parser = parse_pubkey)]
@@ -56,12 +61,13 @@ pub struct GrindArgs {
     #[clap(long, value_parser = parse_pubkey)]
     pub owner: Pubkey,
 
-    /// The target prefix for the pubkey
-    #[clap(long)]
-    pub prefix: Option<String>,
+    /// Target prefixes for the pubkey (repeat or separate with commas)
+    #[clap(long, value_delimiter = ',', value_parser = parse_bs58_pattern)]
+    pub prefix: Vec<String>,
 
-    #[clap(long)]
-    pub suffix: Option<String>,
+    /// Target suffixes for the pubkey (repeat or separate with commas)
+    #[clap(long, value_delimiter = ',', value_parser = parse_bs58_pattern)]
+    pub suffix: Vec<String>,
 
     /// Whether user cares about the case of the pubkey
     #[clap(long, default_value_t = false)]
@@ -82,14 +88,20 @@ pub struct GrindArgs {
 }
 
 #[derive(Debug, Parser)]
+#[command(group(
+    clap::ArgGroup::new("target")
+        .required(true)
+        .multiple(true)
+        .args(["prefix", "suffix"])
+))]
 pub struct GrindKeypairArgs {
-    /// The target prefix for the pubkey
-    #[clap(long)]
-    pub prefix: Option<String>,
+    /// Target prefixes for the pubkey (repeat or separate with commas)
+    #[clap(long, value_delimiter = ',', value_parser = parse_bs58_pattern)]
+    pub prefix: Vec<String>,
 
-    /// The target suffix for the pubkey
-    #[clap(long)]
-    pub suffix: Option<String>,
+    /// Target suffixes for the pubkey (repeat or separate with commas)
+    #[clap(long, value_delimiter = ',', value_parser = parse_bs58_pattern)]
+    pub suffix: Vec<String>,
 
     /// Whether user cares about the case of the pubkey
     #[clap(long, default_value_t = false)]
@@ -198,6 +210,180 @@ fn done(target: u32) -> bool {
 // ─── bs58 probability (from cavemanloverboy/bs58p) ──────────────────────────
 
 const BS58_ALPHABET: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const MAX_BS58_ADDRESS_LEN: usize = 44;
+#[cfg(feature = "gpu")]
+const MAX_GPU_PATTERNS: usize = 32;
+#[cfg(feature = "gpu")]
+const MATCH_PLAN_MASKS: usize = MAX_BS58_ADDRESS_LEN * 58;
+#[cfg(feature = "gpu")]
+const MATCH_PLAN_WORDS: usize = 1 + MATCH_PLAN_MASKS + MAX_BS58_ADDRESS_LEN;
+
+#[derive(Debug)]
+struct SearchTargets {
+    prefixes: Vec<String>,
+    suffixes: Vec<String>,
+    case_insensitive: bool,
+}
+
+impl SearchTargets {
+    fn new(
+        prefixes: Vec<String>,
+        suffixes: Vec<String>,
+        case_insensitive: bool,
+    ) -> Self {
+        Self {
+            prefixes: normalize_patterns(prefixes, true, case_insensitive),
+            suffixes: normalize_patterns(suffixes, false, case_insensitive),
+            case_insensitive,
+        }
+    }
+
+    fn probability(&self) -> f64 {
+        let mut probability = 0.0;
+        if self.prefixes.is_empty() {
+            for suffix in &self.suffixes {
+                probability +=
+                    bs58_probability("", suffix, self.case_insensitive);
+            }
+        } else if self.suffixes.is_empty() {
+            for prefix in &self.prefixes {
+                probability +=
+                    bs58_probability(prefix, "", self.case_insensitive);
+            }
+        } else {
+            for prefix in &self.prefixes {
+                for suffix in &self.suffixes {
+                    probability += bs58_probability(
+                        prefix,
+                        suffix,
+                        self.case_insensitive,
+                    );
+                }
+            }
+        }
+        probability.min(1.0)
+    }
+
+    fn expected_attempts(&self) -> f64 {
+        let probability = self.probability();
+        if probability <= 0.0 {
+            f64::INFINITY
+        } else {
+            1.0 / probability
+        }
+    }
+
+    fn matches(&self, pubkey: &str) -> bool {
+        let prefix_matches = self.prefixes.is_empty()
+            || self.prefixes.iter().any(|prefix| {
+                matches_pattern(pubkey, prefix, true, self.case_insensitive)
+            });
+        prefix_matches
+            && (self.suffixes.is_empty()
+                || self.suffixes.iter().any(|suffix| {
+                    matches_pattern(
+                        pubkey,
+                        suffix,
+                        false,
+                        self.case_insensitive,
+                    )
+                }))
+    }
+
+    #[cfg(feature = "gpu")]
+    fn packed_prefixes(&self) -> Vec<u32> {
+        build_match_plan(&self.prefixes, true, self.case_insensitive)
+    }
+
+    #[cfg(feature = "gpu")]
+    fn packed_suffixes(&self) -> Vec<u32> {
+        build_match_plan(&self.suffixes, false, self.case_insensitive)
+    }
+
+    #[cfg(feature = "gpu")]
+    fn validate_gpu_pattern_count(&self) -> Result<(), String> {
+        if self.prefixes.len() > MAX_GPU_PATTERNS
+            || self.suffixes.len() > MAX_GPU_PATTERNS
+        {
+            return Err(format!(
+                "GPU searches support at most {MAX_GPU_PATTERNS} non-redundant prefixes and suffixes"
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn normalize_patterns(
+    patterns: Vec<String>,
+    prefix: bool,
+    case_insensitive: bool,
+) -> Vec<String> {
+    let mut patterns: Vec<String> = patterns
+        .into_iter()
+        .map(|pattern| {
+            maybe_bs58_aware_lowercase(&pattern, case_insensitive)
+        })
+        .collect();
+    patterns.sort_by_key(String::len);
+
+    let mut normalized: Vec<String> = Vec::with_capacity(patterns.len());
+    for pattern in patterns {
+        let redundant = normalized.iter().any(|existing| {
+            if prefix {
+                pattern.starts_with(existing)
+            } else {
+                pattern.ends_with(existing)
+            }
+        });
+        if !redundant {
+            normalized.push(pattern);
+        }
+    }
+    normalized
+}
+
+#[cfg(feature = "gpu")]
+fn build_match_plan(
+    patterns: &[String],
+    prefix: bool,
+    case_insensitive: bool,
+) -> Vec<u32> {
+    debug_assert!(
+        patterns.len() <= MAX_GPU_PATTERNS,
+        "GPU searches support at most {MAX_GPU_PATTERNS} prefixes and suffixes"
+    );
+
+    let alphabet = if case_insensitive {
+        b"123456789abcdefghjkLmnpqrstuvwxyzabcdefghijkmnopqrstuvwxyz"
+    } else {
+        BS58_ALPHABET.as_bytes()
+    };
+    let mut plan = vec![0u32; MATCH_PLAN_WORDS];
+    plan[0] = match patterns.len() {
+        0 => 0,
+        MAX_GPU_PATTERNS => u32::MAX,
+        count => (1u32 << count) - 1,
+    };
+    for (pattern_index, pattern) in patterns.iter().enumerate() {
+        let candidate = 1u32 << pattern_index;
+        let bytes: Box<dyn Iterator<Item = u8>> = if prefix {
+            Box::new(pattern.bytes())
+        } else {
+            Box::new(pattern.bytes().rev())
+        };
+        for (position, byte) in bytes.enumerate() {
+            let symbol = alphabet
+                .iter()
+                .position(|&candidate| candidate == byte)
+                .unwrap();
+            plan[1 + position * 58 + symbol] |= candidate;
+            if position + 1 == pattern.len() {
+                plan[1 + MATCH_PLAN_MASKS + position] |= candidate;
+            }
+        }
+    }
+    plan
+}
 
 fn bs58_pure_prefix_suffix_prob(prefix: &str, suffix: &str, n_bytes: usize) -> f64 {
     if prefix.is_empty() && suffix.is_empty() {
@@ -268,7 +454,7 @@ fn bs58_ci_position_factor(pattern_c: char) -> f64 {
             if pattern_c == 'L' {
                 a == 'L'
             } else {
-                a.to_ascii_lowercase() == pattern_c.to_ascii_lowercase()
+                a.eq_ignore_ascii_case(&pattern_c)
             }
         })
         .count();
@@ -299,15 +485,6 @@ fn bs58_probability(prefix: &str, suffix: &str, case_insensitive: bool) -> f64 {
         prob * bs58_ci_factor(prefix, suffix)
     } else {
         prob
-    }
-}
-
-fn expected_attempts(prefix: &str, suffix: &str, case_insensitive: bool) -> f64 {
-    let p = bs58_probability(prefix, suffix, case_insensitive);
-    if p <= 0.0 {
-        f64::INFINITY
-    } else {
-        1.0 / p
     }
 }
 
@@ -493,16 +670,26 @@ pub fn deploy_with_max_program_len_with_seed(
 
 fn grind(mut args: GrindArgs) {
     maybe_update_num_cpus(&mut args.num_cpus);
-    let prefix = get_validated_bs58("prefix", &args.prefix, args.case_insensitive);
-    let suffix = get_validated_bs58("suffix", &args.suffix, args.case_insensitive);
+    let targets = Arc::new(SearchTargets::new(
+        std::mem::take(&mut args.prefix),
+        std::mem::take(&mut args.suffix),
+        args.case_insensitive,
+    ));
+    #[cfg(feature = "gpu")]
+    if args.num_gpus > 0 {
+        targets.validate_gpu_pattern_count().unwrap_or_else(|error| {
+            eprintln!("error: {error}");
+            std::process::exit(2);
+        });
+    }
 
-    let expected = expected_attempts(prefix, suffix, args.case_insensitive);
-    let prob = bs58_probability(prefix, suffix, args.case_insensitive);
+    let expected = targets.expected_attempts();
+    let prob = targets.probability();
     #[cfg(feature = "gpu")]
     eprintln!("using {} cpus, {} gpus", args.num_cpus, args.num_gpus);
     #[cfg(not(feature = "gpu"))]
     eprintln!("using {} cpus", args.num_cpus);
-    let target_label = format_target_label(prefix, suffix);
+    let target_label = format_target_label(&targets);
     eprintln!(
         "target: {} | probability: {:.6e} | expected: {} attempts",
         target_label,
@@ -519,10 +706,13 @@ fn grind(mut args: GrindArgs) {
         let base = args.base;
         let owner = args.owner;
         let ci = args.case_insensitive;
+        let targets = Arc::clone(&targets);
         Some(
             thread::Builder::new()
                 .name("gpu_mgr".into())
                 .spawn(move || {
+                    let prefixes = targets.packed_prefixes();
+                    let suffixes = targets.packed_suffixes();
                     let mut contexts = Vec::with_capacity(num_gpus as usize);
                     for id in 0..num_gpus {
                         let ctx = unsafe {
@@ -530,10 +720,10 @@ fn grind(mut args: GrindArgs) {
                                 id as i32,
                                 base.as_ref().as_ptr(),
                                 owner.as_ref().as_ptr(),
-                                prefix.as_ptr(),
-                                prefix.len() as u64,
-                                suffix.as_ptr(),
-                                suffix.len() as u64,
+                                prefixes.as_ptr().cast(),
+                                targets.prefixes.len() as u64,
+                                suffixes.as_ptr().cast(),
+                                targets.suffixes.len() as u64,
                                 ci,
                             )
                         };
@@ -584,10 +774,8 @@ fn grind(mut args: GrindArgs) {
                                 .finalize()
                                 .into();
                             let out_str = fd_bs58::encode_32(reconstructed);
-                            let out_str_check = maybe_bs58_aware_lowercase(&out_str, ci);
 
-                            if out_str_check.starts_with(prefix) && out_str_check.ends_with(suffix)
-                            {
+                            if targets.matches(&out_str) {
                                 eprintln!(
                                     "\r\x1b[Kgpu {} match: {} in {:.3}s",
                                     i, &out_str, time_sec
@@ -678,7 +866,7 @@ fn grind(mut args: GrindArgs) {
                 local_batch -= 4096;
             }
 
-            if matches_target(&pubkey, prefix, suffix, args.case_insensitive) {
+            if targets.matches(&pubkey) {
                 if local_batch > 0 {
                     TOTAL_ATTEMPTS.fetch_add(local_batch, Ordering::Relaxed);
                     local_batch = 0;
@@ -724,11 +912,21 @@ fn grind(mut args: GrindArgs) {
 
 fn grind_keypair(mut args: GrindKeypairArgs) {
     maybe_update_num_cpus(&mut args.num_cpus);
-    let prefix = get_validated_bs58("prefix", &args.prefix, args.case_insensitive);
-    let suffix = get_validated_bs58("suffix", &args.suffix, args.case_insensitive);
+    let targets = Arc::new(SearchTargets::new(
+        std::mem::take(&mut args.prefix),
+        std::mem::take(&mut args.suffix),
+        args.case_insensitive,
+    ));
+    #[cfg(feature = "gpu")]
+    if args.num_gpus > 0 {
+        targets.validate_gpu_pattern_count().unwrap_or_else(|error| {
+            eprintln!("error: {error}");
+            std::process::exit(2);
+        });
+    }
 
-    let expected = expected_attempts(prefix, suffix, args.case_insensitive);
-    let prob = bs58_probability(prefix, suffix, args.case_insensitive);
+    let expected = targets.expected_attempts();
+    let prob = targets.probability();
     #[cfg(feature = "gpu")]
     eprintln!(
         "using {} cpus, {} gpus (cpu backend: {})",
@@ -742,7 +940,7 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
         args.num_cpus,
         fast::backend_name()
     );
-    let target_label = format_target_label(prefix, suffix);
+    let target_label = format_target_label(&targets);
     eprintln!(
         "target: {} | probability: {:.6e} | expected: {} attempts",
         target_label,
@@ -777,19 +975,22 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
     let gpu_thread = if args.num_gpus > 0 {
         let num_gpus = args.num_gpus;
         let ci = args.case_insensitive;
+        let targets = Arc::clone(&targets);
         Some(
             thread::Builder::new()
                 .name("gpu_mgr".into())
                 .spawn(move || {
+                    let prefixes = targets.packed_prefixes();
+                    let suffixes = targets.packed_suffixes();
                     let mut contexts = Vec::with_capacity(num_gpus as usize);
                     for id in 0..num_gpus {
                         let ctx = unsafe {
                             gpu_keypair_init(
                                 id as i32,
-                                prefix.as_ptr(),
-                                prefix.len() as u64,
-                                suffix.as_ptr(),
-                                suffix.len() as u64,
+                                prefixes.as_ptr().cast(),
+                                targets.prefixes.len() as u64,
+                                suffixes.as_ptr().cast(),
+                                targets.suffixes.len() as u64,
                                 ci,
                             )
                         };
@@ -834,13 +1035,11 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                             let signing_key = SigningKey::from_bytes(&found_seed);
                             let pubkey_bytes = signing_key.verifying_key().to_bytes();
                             let pubkey_str = fd_bs58::encode_32(pubkey_bytes);
-                            let pubkey_check = maybe_bs58_aware_lowercase(&pubkey_str, ci);
                             let count = u64::from_le_bytes(array::from_fn(|j| out[32 + j]));
 
                             fast::add_attempts(count);
 
-                            if pubkey_check.starts_with(prefix) && pubkey_check.ends_with(suffix)
-                            {
+                            if targets.matches(&pubkey_str) {
                                 let prev = fast::note_found();
                                 if prev < target_count {
                                     eprintln!(
@@ -898,8 +1097,8 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
     };
 
     fast::run_cpu_workers(
-        prefix,
-        suffix,
+        &targets.prefixes,
+        &targets.suffixes,
         args.case_insensitive,
         args.num_cpus,
         target_count,
@@ -1213,13 +1412,23 @@ fn print_doppler_result(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
     }
 }
 
-fn format_target_label(prefix: &str, suffix: &str) -> String {
-    match (prefix.is_empty(), suffix.is_empty()) {
-        (false, false) => format!("{}...{}", prefix, suffix),
-        (false, true) => prefix.to_string(),
-        (true, false) => format!("...{}", suffix),
-        (true, true) => "*".to_string(),
+fn format_target_label(targets: &SearchTargets) -> String {
+    fn format_group(label: &str, patterns: &[String]) -> Option<String> {
+        match patterns {
+            [] => None,
+            [pattern] => Some(format!("{label}={pattern}")),
+            _ => Some(format!("{label}=[{}]", patterns.join(" | "))),
+        }
     }
+
+    [
+        format_group("prefix", &targets.prefixes),
+        format_group("suffix", &targets.suffixes),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join(" AND ")
 }
 
 fn print_keypair_result(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
@@ -1230,19 +1439,22 @@ fn print_keypair_result(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
     eprintln!("keypair json (solana-compatible): {:?}", keypair_json);
 }
 
-fn get_validated_bs58(label: &str, value: &Option<String>, case_insensitive: bool) -> &'static str {
-    const BS58_CHARS: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    if let Some(ref s) = value {
-        for c in s.chars() {
-            assert!(
-                BS58_CHARS.contains(c),
-                "your {label} contains invalid bs58: {c}"
-            );
-        }
-        let validated = maybe_bs58_aware_lowercase(s, case_insensitive);
-        return validated.leak();
+fn parse_bs58_pattern(pattern: &str) -> Result<String, String> {
+    if pattern.is_empty() {
+        return Err("pattern cannot be empty".to_string());
     }
-    ""
+    if pattern.len() > MAX_BS58_ADDRESS_LEN {
+        return Err(format!(
+            "pattern cannot exceed {MAX_BS58_ADDRESS_LEN} characters"
+        ));
+    }
+    if let Some(invalid) = pattern
+        .chars()
+        .find(|character| !BS58_ALPHABET.contains(*character))
+    {
+        return Err(format!("pattern contains invalid base58 character: {invalid}"));
+    }
+    Ok(pattern.to_string())
 }
 
 fn maybe_bs58_aware_lowercase(target: &str, case_insensitive: bool) -> String {
@@ -1256,12 +1468,18 @@ fn maybe_bs58_aware_lowercase(target: &str, case_insensitive: bool) -> String {
     }
 }
 
-fn matches_target(pubkey: &str, prefix: &str, suffix: &str, case_insensitive: bool) -> bool {
+fn matches_pattern(
+    pubkey: &str,
+    pattern: &str,
+    prefix: bool,
+    case_insensitive: bool,
+) -> bool {
     if case_insensitive {
-        (prefix.is_empty() || bs58_ci_matches(pubkey, prefix, true))
-            && (suffix.is_empty() || bs58_ci_matches(pubkey, suffix, false))
+        bs58_ci_matches(pubkey, pattern, prefix)
+    } else if prefix {
+        pubkey.starts_with(pattern)
     } else {
-        pubkey.starts_with(prefix) && pubkey.ends_with(suffix)
+        pubkey.ends_with(pattern)
     }
 }
 
@@ -1290,10 +1508,10 @@ extern "C" {
         id: i32,
         base: *const u8,
         owner: *const u8,
-        target: *const u8,
-        target_len: u64,
-        suffix: *const u8,
-        suffix_len: u64,
+        prefixes: *const u8,
+        prefix_count: u64,
+        suffixes: *const u8,
+        suffix_count: u64,
         case_insensitive: bool,
     ) -> *mut std::ffi::c_void;
     pub fn gpu_grind_launch(ctx: *mut std::ffi::c_void, seed: *const u8);
@@ -1303,10 +1521,10 @@ extern "C" {
 
     pub fn gpu_keypair_init(
         id: i32,
-        prefix: *const u8,
-        prefix_len: u64,
-        suffix: *const u8,
-        suffix_len: u64,
+        prefixes: *const u8,
+        prefix_count: u64,
+        suffixes: *const u8,
+        suffix_count: u64,
         case_insensitive: bool,
     ) -> *mut std::ffi::c_void;
     pub fn gpu_keypair_launch(ctx: *mut std::ffi::c_void, seed: *const u8);
@@ -1361,5 +1579,130 @@ mod tests {
     #[test]
     fn bs58_ci_factor_skips_non_letters() {
         assert_eq!(bs58_ci_factor("1A", ""), 2.0);
+    }
+
+    #[test]
+    fn cli_accepts_repeated_and_comma_delimited_targets() {
+        let command = Command::try_parse_from([
+            "vanity",
+            "grind-keypair",
+            "--prefix",
+            "sun",
+            "--prefix",
+            "moon,mint",
+            "--suffix",
+            "key",
+        ])
+        .unwrap();
+
+        let Command::GrindKeypair(args) = command else {
+            panic!("expected grind-keypair command");
+        };
+        assert_eq!(args.prefix, ["sun", "moon", "mint"]);
+        assert_eq!(args.suffix, ["key"]);
+    }
+
+    #[test]
+    fn cli_requires_a_target() {
+        assert!(Command::try_parse_from(["vanity", "grind-keypair"])
+            .is_err());
+    }
+
+    #[test]
+    fn targets_match_any_prefix_and_any_suffix() {
+        let targets = SearchTargets::new(
+            vec!["sun".to_string(), "moon".to_string()],
+            vec!["key".to_string(), "mint".to_string()],
+            false,
+        );
+        assert!(targets.matches("sun7testkey"));
+        assert!(targets.matches("moon7testmint"));
+        assert!(!targets.matches("sun7testend"));
+        assert!(!targets.matches("star7testkey"));
+    }
+
+    #[test]
+    fn normalization_removes_duplicate_and_redundant_targets() {
+        let targets = SearchTargets::new(
+            vec!["Sun".to_string(), "sun".to_string(), "sunny".to_string()],
+            vec!["mint".to_string(), "int".to_string()],
+            true,
+        );
+        assert_eq!(targets.prefixes, ["sun"]);
+        assert_eq!(targets.suffixes, ["int"]);
+    }
+
+    #[test]
+    fn multi_target_probability_sums_disjoint_alternatives() {
+        let targets = SearchTargets::new(
+            vec!["sun".to_string(), "moon".to_string()],
+            Vec::new(),
+            false,
+        );
+        let expected = bs58_probability("sun", "", false)
+            + bs58_probability("moon", "", false);
+        assert!((targets.probability() - expected).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn parser_rejects_invalid_or_overlong_patterns() {
+        assert!(parse_bs58_pattern("zero0").is_err());
+        assert!(parse_bs58_pattern(&"a".repeat(45)).is_err());
+    }
+
+    #[cfg(feature = "gpu")]
+    fn match_plan_matches(plan: &[u32], value: &str, reverse: bool) -> bool {
+        let mut candidates = plan[0];
+        let bytes: Box<dyn Iterator<Item = u8>> = if reverse {
+            Box::new(value.bytes().rev())
+        } else {
+            Box::new(value.bytes())
+        };
+        for (position, byte) in bytes.enumerate() {
+            if position >= MAX_BS58_ADDRESS_LEN {
+                return false;
+            }
+            let symbol = BS58_ALPHABET
+                .as_bytes()
+                .iter()
+                .position(|&candidate| candidate == byte)
+                .unwrap();
+            candidates &= plan[1 + position * 58 + symbol];
+            if candidates & plan[1 + MATCH_PLAN_MASKS + position] != 0 {
+                return true;
+            }
+            if candidates == 0 {
+                return false;
+            }
+        }
+        false
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_match_plans_use_or_semantics() {
+        let prefixes = vec!["sun".to_string(), "moon".to_string()];
+        let prefix_plan = build_match_plan(&prefixes, true, false);
+        assert!(match_plan_matches(&prefix_plan, "sunset", false));
+        assert!(match_plan_matches(&prefix_plan, "moonbeam", false));
+        assert!(!match_plan_matches(&prefix_plan, "star", false));
+
+        let suffixes = vec!["mint".to_string(), "key".to_string()];
+        let suffix_plan = build_match_plan(&suffixes, false, false);
+        assert!(match_plan_matches(&suffix_plan, "seedmint", true));
+        assert!(match_plan_matches(&suffix_plan, "vanitykey", true));
+        assert!(!match_plan_matches(&suffix_plan, "seed", true));
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn gpu_pattern_limit_returns_a_cli_error() {
+        let prefixes = BS58_ALPHABET
+            .chars()
+            .take(MAX_GPU_PATTERNS + 1)
+            .map(|character| character.to_string())
+            .collect();
+        let targets = SearchTargets::new(prefixes, Vec::new(), false);
+        assert!(targets.validate_gpu_pattern_count().is_err());
     }
 }
