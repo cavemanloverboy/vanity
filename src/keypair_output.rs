@@ -1,6 +1,7 @@
 use std::{
+    fmt::Write as FmtWrite,
     fs::{self, OpenOptions},
-    io::{self, Write},
+    io::{self, Write as IoWrite},
     path::{Path, PathBuf},
 };
 
@@ -50,13 +51,28 @@ fn save_keypair(path: &Path, keypair: &[u8]) -> io::Result<()> {
     }
 
     let mut file = options.open(path)?;
-    let result =
-        writeln!(file, "{keypair:?}").and_then(|_| file.sync_all());
+    let json = serialize_keypair(keypair);
+    let result = file
+        .write_all(json.as_bytes())
+        .and_then(|_| file.sync_all());
     if result.is_err() {
         drop(file);
         let _ = fs::remove_file(path);
     }
     result
+}
+
+fn serialize_keypair(keypair: &[u8]) -> String {
+    let mut json = String::with_capacity(256);
+    json.push('[');
+    for (index, byte) in keypair.iter().enumerate() {
+        if index > 0 {
+            json.push(',');
+        }
+        write!(&mut json, "{byte}").unwrap();
+    }
+    json.push(']');
+    json
 }
 
 #[cfg(test)]
@@ -72,7 +88,7 @@ mod tests {
     }
 
     #[test]
-    fn saves_solana_keypair_without_overwriting() {
+    fn saves_compact_solana_keypair_without_overwriting() {
         let directory = test_directory();
         fs::create_dir(&directory).unwrap();
         let path = directory.join("example.json");
@@ -85,14 +101,14 @@ mod tests {
         save_keypair(&path, &keypair).unwrap();
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
-            format!("{keypair:?}\n")
+            serialize_keypair(&keypair)
         );
 
         let error = save_keypair(&path, &[3u8; 64]).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
-            format!("{keypair:?}\n")
+            serialize_keypair(&keypair)
         );
 
         #[cfg(unix)]
