@@ -23,6 +23,13 @@ fn build_cuda_libs() {
         .file("kernels/sha256.cu")
         .flag("-cudart=static");
 
+    // Cargo's release profile keeps Rust debug symbols, but forwarding that
+    // setting to nvcc enables `-G` device-debug code and can reduce kernel
+    // throughput by orders of magnitude. Keep `-G` available in debug builds.
+    if std::env::var("PROFILE").as_deref() == Ok("release") {
+        build.debug(false);
+    }
+
     // Which GPU architectures to generate code for. A cubin built for one
     // compute capability only runs on that capability (e.g. an sm_89 cubin
     // will NOT load on an sm_86 RTX 3090), and PTX only JITs *upward*, so a
