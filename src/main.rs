@@ -1,4 +1,5 @@
 mod fast;
+mod keypair_output;
 
 use clap::Parser;
 use ed25519_dalek::SigningKey;
@@ -107,6 +108,10 @@ pub struct GrindKeypairArgs {
     /// Number of matching keypairs to find before stopping
     #[clap(long, default_value_t = 1)]
     pub count: u32,
+
+    /// Save each matching keypair as <PUBKEY>.json in the current directory
+    #[clap(long, default_value_t = false)]
+    pub save: bool,
 }
 
 #[derive(Debug, Parser)]
@@ -777,10 +782,11 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
     let gpu_thread = if args.num_gpus > 0 {
         let num_gpus = args.num_gpus;
         let ci = args.case_insensitive;
+        let save = args.save;
         Some(
             thread::Builder::new()
                 .name("gpu_mgr".into())
-                .spawn(move || {
+                .spawn(move || -> std::io::Result<()> {
                     let mut contexts = Vec::with_capacity(num_gpus as usize);
                     for id in 0..num_gpus {
                         let ctx = unsafe {
@@ -799,6 +805,7 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                     let mut iterations = vec![0u64; num_gpus as usize];
                     let mut launch_times = vec![Instant::now(); num_gpus as usize];
                     let mut in_flight = vec![false; num_gpus as usize];
+                    let mut output_error = None;
 
                     for (i, &ctx) in contexts.iter().enumerate() {
                         let seed = new_gpu_seed(i as u32, 0);
@@ -809,7 +816,7 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                         in_flight[i] = true;
                     }
 
-                    loop {
+                    'grind: loop {
                         if fast::is_done(target_count) || ABORTED.load(Ordering::Relaxed) {
                             break;
                         }
@@ -847,11 +854,17 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                                         "\r\x1b[Kgpu {} match: {} in {:.3}s",
                                         i, &pubkey_str, time_sec
                                     );
-                                    print_keypair_result(
+                                    if let Err(error) = keypair_output::print_keypair(
                                         &found_seed,
                                         &pubkey_bytes,
                                         &pubkey_str,
-                                    );
+                                        save,
+                                    ) {
+                                        in_flight[i] = false;
+                                        fast::request_abort();
+                                        output_error = Some(error);
+                                        break 'grind;
+                                    }
                                 }
                             }
 
@@ -890,6 +903,7 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                             gpu_keypair_destroy(ctx);
                         }
                     }
+                    output_error.map_or(Ok(()), Err)
                 })
                 .unwrap(),
         )
@@ -897,21 +911,22 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
         None
     };
 
-    fast::run_cpu_workers(
+    let cpu_result = fast::run_cpu_workers(
         prefix,
         suffix,
         args.case_insensitive,
         args.num_cpus,
         target_count,
+        args.save,
     );
 
     // CPU workers finished (found enough or aborted); stop GPU too.
     fast::request_abort();
 
     #[cfg(feature = "gpu")]
-    if let Some(t) = gpu_thread {
-        t.join().unwrap();
-    }
+    let gpu_result = gpu_thread
+        .map(|thread| thread.join().unwrap())
+        .unwrap_or(Ok(()));
 
     shutdown.store(true, Ordering::SeqCst);
     reporter.join().unwrap();
@@ -925,6 +940,16 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
         format_duration(elapsed),
         (rate as u64).to_formatted_string(&Locale::en)
     );
+
+    #[cfg(feature = "gpu")]
+    let output_result = cpu_result.and(gpu_result);
+    #[cfg(not(feature = "gpu"))]
+    let output_result = cpu_result;
+
+    if let Err(error) = output_result {
+        eprintln!("error: {error}");
+        std::process::exit(1);
+    }
 }
 
 // ─── doppler ──────────────────────────────────────────────────────────────
@@ -1173,8 +1198,13 @@ fn doppler_probability(required: u8) -> f64 {
 
 /// Print the matched keypair plus a per-segment breakdown, including the
 /// assembly `.equ` constants the doppler-keygen reference emits.
-fn print_doppler_result(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
-    print_keypair_result(seed, pubkey, pubkey_str);
+fn print_doppler_result(
+    seed: &[u8; 32],
+    pubkey: &[u8; 32],
+    pubkey_str: &str,
+) {
+    keypair_output::print_keypair(seed, pubkey, pubkey_str, false)
+        .unwrap();
     eprintln!(
         "doppler: {}/4 sign-extendable segment(s)",
         doppler_count_segments(pubkey)
@@ -1220,14 +1250,6 @@ fn format_target_label(prefix: &str, suffix: &str) -> String {
         (true, false) => format!("...{}", suffix),
         (true, true) => "*".to_string(),
     }
-}
-
-fn print_keypair_result(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
-    let seed_hex: String = seed.iter().map(|b| format!("{b:02x}")).collect();
-    eprintln!("pubkey:   {pubkey_str}");
-    eprintln!("seed hex: {seed_hex}");
-    let keypair_json: Vec<u8> = seed.iter().chain(pubkey.iter()).copied().collect();
-    eprintln!("keypair json (solana-compatible): {:?}", keypair_json);
 }
 
 fn get_validated_bs58(label: &str, value: &Option<String>, case_insensitive: bool) -> &'static str {
@@ -1361,5 +1383,21 @@ mod tests {
     #[test]
     fn bs58_ci_factor_skips_non_letters() {
         assert_eq!(bs58_ci_factor("1A", ""), 2.0);
+    }
+
+    #[test]
+    fn grind_keypair_parses_save_flag() {
+        let Command::GrindKeypair(args) = Command::try_parse_from([
+            "vanity",
+            "grind-keypair",
+            "--prefix",
+            "sun",
+            "--save",
+        ])
+        .unwrap() else {
+            panic!("expected grind-keypair command");
+        };
+
+        assert!(args.save);
     }
 }

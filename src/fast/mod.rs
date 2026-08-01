@@ -9,9 +9,12 @@ use field::{batch_invert, Fe};
 use group::{edwards_d2, Niels, Point};
 
 use sha2::{Digest, Sha512};
-use std::sync::{
-    atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-    OnceLock,
+use std::{
+    io,
+    sync::{
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        OnceLock,
+    },
 };
 
 pub const BATCH: usize = 512;
@@ -194,7 +197,11 @@ unsafe fn keygen_batch_simd(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512ifma,avx512dq")]
-unsafe fn grind_thread_simd(target: &MatchTarget, count: u32) {
+unsafe fn grind_thread_simd(
+    target: &MatchTarget,
+    count: u32,
+    save: bool,
+) -> io::Result<()> {
     let mut seeds: [[u8; 32]; BATCH] = [[0u8; 32]; BATCH];
     for s in seeds.iter_mut() {
         *s = rand::random();
@@ -219,15 +226,31 @@ unsafe fn grind_thread_simd(target: &MatchTarget, count: u32) {
                 if prev < count {
                     let s = fd_bs58::encode_32(pubkeys[j]);
                     eprintln!("\r\x1b[Kmatch: {s}");
-                    print_keypair(&used[j], &pubkeys[j], &s);
+                    if let Err(error) =
+                        crate::keypair_output::print_keypair(
+                            &used[j],
+                            &pubkeys[j],
+                            &s,
+                            save,
+                        )
+                    {
+                        GRIND_ABORT.store(true, Ordering::SeqCst);
+                        GRIND_TOTAL.fetch_add(local, Ordering::Relaxed);
+                        return Err(error);
+                    }
                 }
             }
         }
     }
     GRIND_TOTAL.fetch_add(local, Ordering::Relaxed);
+    Ok(())
 }
 
-fn grind_thread_scalar(target: &MatchTarget, count: u32) {
+fn grind_thread_scalar(
+    target: &MatchTarget,
+    count: u32,
+    save: bool,
+) -> io::Result<()> {
     let mut seeds: [[u8; 32]; BATCH] = [[0u8; 32]; BATCH];
     for s in seeds.iter_mut() {
         *s = rand::random();
@@ -252,12 +275,24 @@ fn grind_thread_scalar(target: &MatchTarget, count: u32) {
                 if prev < count {
                     let s = fd_bs58::encode_32(pubkeys[j]);
                     eprintln!("\r\x1b[Kmatch: {s}");
-                    print_keypair(&used[j], &pubkeys[j], &s);
+                    if let Err(error) =
+                        crate::keypair_output::print_keypair(
+                            &used[j],
+                            &pubkeys[j],
+                            &s,
+                            save,
+                        )
+                    {
+                        GRIND_ABORT.store(true, Ordering::SeqCst);
+                        GRIND_TOTAL.fetch_add(local, Ordering::Relaxed);
+                        return Err(error);
+                    }
                 }
             }
         }
     }
     GRIND_TOTAL.fetch_add(local, Ordering::Relaxed);
+    Ok(())
 }
 
 #[inline(always)]
@@ -331,36 +366,24 @@ pub fn run_cpu_workers(
     case_insensitive: bool,
     num_cpus: u32,
     count: u32,
-) {
+    save: bool,
+) -> io::Result<()> {
     let target = MatchTarget::new(prefix, suffix, case_insensitive);
 
-    (0..num_cpus).into_par_iter().for_each(|_| {
-        #[cfg(target_arch = "x86_64")]
-        {
-            if simd::available() {
-                unsafe { grind_thread_simd(&target, count) };
-            } else {
-                grind_thread_scalar(&target, count);
+    (0..num_cpus)
+        .into_par_iter()
+        .try_for_each(|_| {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if simd::available() {
+                    unsafe { grind_thread_simd(&target, count, save) }
+                } else {
+                    grind_thread_scalar(&target, count, save)
+                }
             }
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        grind_thread_scalar(&target, count);
-    });
-}
-
-fn print_keypair(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
-    let seed_hex: String = seed
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    eprintln!("pubkey:   {pubkey_str}");
-    eprintln!("seed hex: {seed_hex}");
-    let json: Vec<u8> = seed
-        .iter()
-        .chain(pubkey.iter())
-        .copied()
-        .collect();
-    eprintln!("keypair json (solana-compatible): {json:?}");
+            #[cfg(not(target_arch = "x86_64"))]
+            grind_thread_scalar(&target, count, save)
+        })
 }
 
 #[cfg(test)]
