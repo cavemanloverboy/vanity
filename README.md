@@ -124,6 +124,14 @@ seed hex: 68e36f80...
 keypair json (solana-compatible): [104, 227, 111, ...]
 ```
 
+Pass `--save` to also write each match to `<PUBKEY>.json` in the current
+directory. Existing files are never overwritten. On Unix, new keypair files
+are readable and writable only by their owner.
+
+```bash
+vanity grind-keypair --prefix sun --save
+```
+
 Add `--case-insensitive` to match the prefix/suffix ignoring case (except `L`,
 which has no lowercase form in base58).
 
@@ -178,6 +186,7 @@ doppler: 1/4 sign-extendable segment(s)
 | `--count <N>` | all | `1` | stop after finding N matches |
 | `--case-insensitive` | `grind`, `grind-keypair` | off | match prefix/suffix ignoring case |
 | `--prefix` / `--suffix` | `grind`, `grind-keypair` | — | base58 target(s) to match; supply at least one |
+| `--save` | `grind-keypair` | off | save matches as `<PUBKEY>.json` in the current directory |
 | `--segments <1-4>` | `grind-doppler` | `1` | sign-extendable segments required |
 
 To run purely on CPU (no GPU), build without a GPU feature, or pass `--num-gpus 0`.
