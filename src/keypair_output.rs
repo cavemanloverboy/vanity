@@ -18,10 +18,11 @@ pub fn print_keypair(
     let mut keypair = [0u8; 64];
     keypair[..32].copy_from_slice(seed);
     keypair[32..].copy_from_slice(pubkey);
+    let keypair_json = serialize_keypair(&keypair);
 
     eprintln!("pubkey:   {pubkey_str}");
     eprintln!("seed hex: {seed_hex}");
-    eprintln!("keypair json (solana-compatible): {keypair:?}");
+    eprintln!("keypair json (solana-compatible): {keypair_json}");
 
     if save {
         let path = PathBuf::from(format!("{pubkey_str}.json"));
