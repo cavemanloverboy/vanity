@@ -8,6 +8,7 @@ use check_match::MatchTarget;
 use field::{batch_invert, Fe};
 use group::{edwards_d2, Niels, Point};
 
+use crate::{print_keypair, save_keypair};
 use sha2::{Digest, Sha512};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -220,6 +221,7 @@ unsafe fn grind_thread_simd(target: &MatchTarget, count: u32) {
                     let s = fd_bs58::encode_32(pubkeys[j]);
                     eprintln!("\r\x1b[Kmatch: {s}");
                     print_keypair(&used[j], &pubkeys[j], &s);
+                    save_keypair(&used[j], &pubkeys[j], &s);
                 }
             }
         }
@@ -253,6 +255,7 @@ fn grind_thread_scalar(target: &MatchTarget, count: u32) {
                     let s = fd_bs58::encode_32(pubkeys[j]);
                     eprintln!("\r\x1b[Kmatch: {s}");
                     print_keypair(&used[j], &pubkeys[j], &s);
+                    save_keypair(&used[j], &pubkeys[j], &s);
                 }
             }
         }
@@ -346,21 +349,6 @@ pub fn run_cpu_workers(
         #[cfg(not(target_arch = "x86_64"))]
         grind_thread_scalar(&target, count);
     });
-}
-
-fn print_keypair(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
-    let seed_hex: String = seed
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    eprintln!("pubkey:   {pubkey_str}");
-    eprintln!("seed hex: {seed_hex}");
-    let json: Vec<u8> = seed
-        .iter()
-        .chain(pubkey.iter())
-        .copied()
-        .collect();
-    eprintln!("keypair json (solana-compatible): {json:?}");
 }
 
 #[cfg(test)]

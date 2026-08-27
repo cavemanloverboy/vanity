@@ -25,7 +25,7 @@ use {
 };
 
 use std::{
-    array,
+    array, fs,
     io::Write,
     str::FromStr,
     sync::{
@@ -847,7 +847,12 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                                         "\r\x1b[Kgpu {} match: {} in {:.3}s",
                                         i, &pubkey_str, time_sec
                                     );
-                                    print_keypair_result(
+                                    print_keypair(
+                                        &found_seed,
+                                        &pubkey_bytes,
+                                        &pubkey_str,
+                                    );
+                                    save_keypair(
                                         &found_seed,
                                         &pubkey_bytes,
                                         &pubkey_str,
@@ -1019,6 +1024,7 @@ fn grind_doppler(mut args: DopplerArgs) {
                                     i, &pubkey_str, time_sec
                                 );
                                 print_doppler_result(&found_seed, &pubkey_bytes, &pubkey_str);
+                                save_keypair(&found_seed, &pubkey_bytes, &pubkey_str);
                                 FOUND.fetch_add(1, Ordering::SeqCst);
                             }
 
@@ -1106,6 +1112,7 @@ fn grind_doppler(mut args: DopplerArgs) {
                     (global_rate as u64).to_formatted_string(&Locale::en)
                 );
                 print_doppler_result(&seed, &pubkey_bytes, &pubkey_str);
+                save_keypair(&seed, &pubkey_bytes, &pubkey_str);
                 FOUND.fetch_add(1, Ordering::SeqCst);
                 if done(target_count) {
                     break;
@@ -1174,7 +1181,7 @@ fn doppler_probability(required: u8) -> f64 {
 /// Print the matched keypair plus a per-segment breakdown, including the
 /// assembly `.equ` constants the doppler-keygen reference emits.
 fn print_doppler_result(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
-    print_keypair_result(seed, pubkey, pubkey_str);
+    print_keypair(seed, pubkey, pubkey_str);
     eprintln!(
         "doppler: {}/4 sign-extendable segment(s)",
         doppler_count_segments(pubkey)
@@ -1222,16 +1229,66 @@ fn format_target_label(prefix: &str, suffix: &str) -> String {
     }
 }
 
-fn print_keypair_result(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
-    let seed_hex: String = seed.iter().map(|b| format!("{b:02x}")).collect();
+pub(crate) fn print_keypair(
+    seed: &[u8; 32],
+    pubkey: &[u8; 32],
+    pubkey_str: &str,
+) {
+    let seed_hex: String = seed
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     eprintln!("pubkey:   {pubkey_str}");
     eprintln!("seed hex: {seed_hex}");
-    let keypair_json: Vec<u8> = seed.iter().chain(pubkey.iter()).copied().collect();
+    let keypair_json: Vec<u8> = seed
+        .iter()
+        .chain(pubkey.iter())
+        .copied()
+        .collect();
     eprintln!("keypair json (solana-compatible): {:?}", keypair_json);
 }
 
-fn get_validated_bs58(label: &str, value: &Option<String>, case_insensitive: bool) -> &'static str {
-    const BS58_CHARS: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+pub(crate) fn save_keypair(
+    seed: &[u8; 32],
+    pubkey: &[u8; 32],
+    pubkey_str: &str,
+) {
+    let bytes: Vec<u8> = seed
+        .iter()
+        .chain(pubkey.iter())
+        .copied()
+        .collect();
+
+    let path = format!("{pubkey_str}.json");
+    let json = format!("{bytes:?}");
+
+    // Create file with mode 0600 so we don't expose the private key
+    // to other users on the box.
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true)
+        .create(true)
+        .truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+
+    if let Err(err) = opts
+        .open(&path)
+        .and_then(|mut f| f.write_all(json.as_bytes()))
+    {
+        eprintln!("failed to write keypair to {path}: {err}");
+    }
+}
+
+fn get_validated_bs58(
+    label: &str,
+    value: &Option<String>,
+    case_insensitive: bool,
+) -> &'static str {
+    const BS58_CHARS: &str =
+        "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     if let Some(ref s) = value {
         for c in s.chars() {
             assert!(
