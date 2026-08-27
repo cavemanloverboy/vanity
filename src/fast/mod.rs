@@ -337,18 +337,20 @@ pub fn run_cpu_workers(
 ) {
     let target = MatchTarget::new(prefix, suffix, case_insensitive);
 
-    (0..num_cpus).into_par_iter().for_each(|_| {
-        #[cfg(target_arch = "x86_64")]
-        {
-            if simd::available() {
-                unsafe { grind_thread_simd(&target, count) };
-            } else {
-                grind_thread_scalar(&target, count);
+    (0..num_cpus)
+        .into_par_iter()
+        .for_each(|_| {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if simd::available() {
+                    unsafe { grind_thread_simd(&target, count) };
+                } else {
+                    grind_thread_scalar(&target, count);
+                }
             }
-        }
-        #[cfg(not(target_arch = "x86_64"))]
-        grind_thread_scalar(&target, count);
-    });
+            #[cfg(not(target_arch = "x86_64"))]
+            grind_thread_scalar(&target, count);
+        });
 }
 
 #[cfg(test)]
