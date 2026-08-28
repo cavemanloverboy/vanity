@@ -14,6 +14,8 @@ use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
     OnceLock,
 };
+use sha2::{Digest, Sha512};
+use std::sync::{atomic::Ordering, OnceLock};
 
 pub const BATCH: usize = 512;
 
@@ -212,12 +214,12 @@ unsafe fn grind_thread_simd(target: &MatchTarget, count: u32) {
         keygen_batch_simd(&mut seeds, &mut used, &mut pubkeys);
         local += BATCH as u64;
         if local >= 4096 {
-            GRIND_TOTAL.fetch_add(local, Ordering::Relaxed);
+            TOTAL_ATTEMPTS.fetch_add(local, Ordering::Relaxed);
             local = 0;
         }
         for j in 0..BATCH {
             if target.matches(&pubkeys[j]) {
-                let prev = GRIND_FOUND.fetch_add(1, Ordering::SeqCst);
+                let prev = FOUND.fetch_add(1, Ordering::SeqCst);
                 if prev < count {
                     let s = fd_bs58::encode_32(pubkeys[j]);
                     eprintln!("\r\x1b[Kmatch: {s}");
@@ -227,7 +229,7 @@ unsafe fn grind_thread_simd(target: &MatchTarget, count: u32) {
             }
         }
     }
-    GRIND_TOTAL.fetch_add(local, Ordering::Relaxed);
+    TOTAL_ATTEMPTS.fetch_add(local, Ordering::Relaxed);
 }
 
 fn grind_thread_scalar(target: &MatchTarget, count: u32) {
@@ -247,12 +249,12 @@ fn grind_thread_scalar(target: &MatchTarget, count: u32) {
         keygen_batch(&mut seeds, &mut used, &mut pubkeys);
         local += BATCH as u64;
         if local >= 4096 {
-            GRIND_TOTAL.fetch_add(local, Ordering::Relaxed);
+            TOTAL_ATTEMPTS.fetch_add(local, Ordering::Relaxed);
             local = 0;
         }
         for j in 0..BATCH {
             if target.matches(&pubkeys[j]) {
-                let prev = GRIND_FOUND.fetch_add(1, Ordering::SeqCst);
+                let prev = FOUND.fetch_add(1, Ordering::SeqCst);
                 if prev < count {
                     let s = fd_bs58::encode_32(pubkeys[j]);
                     eprintln!("\r\x1b[Kmatch: {s}");
@@ -262,13 +264,13 @@ fn grind_thread_scalar(target: &MatchTarget, count: u32) {
             }
         }
     }
-    GRIND_TOTAL.fetch_add(local, Ordering::Relaxed);
+    TOTAL_ATTEMPTS.fetch_add(local, Ordering::Relaxed);
 }
 
 #[inline(always)]
 fn grind_done(count: u32) -> bool {
-    GRIND_FOUND.load(Ordering::Relaxed) >= count
-        || GRIND_ABORT.load(Ordering::Relaxed)
+    FOUND.load(Ordering::Relaxed) >= count
+        || ABORTED.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -285,29 +287,20 @@ pub fn pubkey_of_seed(seed: &[u8; 32]) -> [u8; 32] {
 
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
-static GRIND_FOUND: AtomicU32 = AtomicU32::new(0);
-static GRIND_TOTAL: AtomicU64 = AtomicU64::new(0);
-static GRIND_ABORT: AtomicBool = AtomicBool::new(false);
-
 pub fn reset_grind() {
-    GRIND_FOUND.store(0, Ordering::SeqCst);
-    GRIND_TOTAL.store(0, Ordering::SeqCst);
-    GRIND_ABORT.store(false, Ordering::SeqCst);
+    FOUND.store(0, Ordering::SeqCst);
+    TOTAL_ATTEMPTS.store(0, Ordering::SeqCst);
+    ABORTED.store(false, Ordering::SeqCst);
 }
 
 pub fn request_abort() {
-    GRIND_ABORT.store(true, Ordering::SeqCst);
-}
-
-#[cfg(feature = "gpu")]
-pub fn add_attempts(n: u64) {
-    GRIND_TOTAL.fetch_add(n, Ordering::Relaxed);
+    ABORTED.store(true, Ordering::SeqCst);
 }
 
 /// Returns the previous found count (caller should print only if `prev < count`).
 #[cfg(feature = "gpu")]
 pub fn note_found() -> u32 {
-    GRIND_FOUND.fetch_add(1, Ordering::SeqCst)
+    FOUND.fetch_add(1, Ordering::SeqCst)
 }
 
 #[cfg(feature = "gpu")]
@@ -316,7 +309,7 @@ pub fn is_done(count: u32) -> bool {
 }
 
 pub fn total_attempts() -> u64 {
-    GRIND_TOTAL.load(Ordering::Relaxed)
+    TOTAL_ATTEMPTS.load(Ordering::Relaxed)
 }
 
 pub fn backend_name() -> &'static str {
