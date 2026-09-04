@@ -1338,12 +1338,7 @@ pub(crate) fn print_keypair(
     pubkey: &[u8; 32],
     pubkey_str: &str,
 ) {
-    let seed_hex: String = seed
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
     eprintln!("pubkey:   {pubkey_str}");
-    eprintln!("seed hex: {seed_hex}");
     let keypair_json: Vec<u8> = seed
         .iter()
         .chain(pubkey.iter())
