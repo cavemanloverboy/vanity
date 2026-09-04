@@ -13,7 +13,9 @@ use solana_pubkey::Pubkey;
 use {
     solana_rpc_client::rpc_client::RpcClient,
     solana_sdk::{
-        bpf_loader_upgradeable::{self, get_program_data_address, UpgradeableLoaderState},
+        bpf_loader_upgradeable::{
+            self, get_program_data_address, UpgradeableLoaderState,
+        },
         instruction::{AccountMeta, Instruction},
         loader_upgradeable_instruction::UpgradeableLoaderInstruction,
         signature::read_keypair_file,
@@ -25,7 +27,7 @@ use {
 };
 
 use std::{
-    array,
+    array, fs,
     io::Write,
     str::FromStr,
     sync::{
@@ -153,7 +155,10 @@ pub struct DeployArgs {
     pub base: PathBuf,
 
     /// The keypair that will be the signer for the CreateAccountWithSeed instruction
-    #[clap(long, default_value = "https://api.mainnet-beta.solana.com")]
+    #[clap(
+        long,
+        default_value = "https://api.mainnet-beta.solana.com"
+    )]
     pub rpc: String,
 
     /// The account owner, e.g. BPFLoaderUpgradeab1e11111111111111111111111 or TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
@@ -192,14 +197,20 @@ static TOTAL_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 static ABORTED: AtomicBool = AtomicBool::new(false);
 
 fn done(target: u32) -> bool {
-    FOUND.load(Ordering::SeqCst) >= target || ABORTED.load(Ordering::SeqCst)
+    FOUND.load(Ordering::SeqCst) >= target
+        || ABORTED.load(Ordering::SeqCst)
 }
 
 // ─── bs58 probability (from cavemanloverboy/bs58p) ──────────────────────────
 
-const BS58_ALPHABET: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+const BS58_ALPHABET: &str =
+    "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
 
-fn bs58_pure_prefix_suffix_prob(prefix: &str, suffix: &str, n_bytes: usize) -> f64 {
+fn bs58_pure_prefix_suffix_prob(
+    prefix: &str,
+    suffix: &str,
+    n_bytes: usize,
+) -> f64 {
     if prefix.is_empty() && suffix.is_empty() {
         return 1.0;
     }
@@ -210,12 +221,14 @@ fn bs58_pure_prefix_suffix_prob(prefix: &str, suffix: &str, n_bytes: usize) -> f
     let mut p_val = BigUint::zero();
     for (i, c) in prefix.chars().enumerate() {
         let idx = BS58_ALPHABET.find(c).unwrap();
-        p_val += BigUint::from(idx) * b58.pow((prefix_len - 1 - i) as u32);
+        p_val +=
+            BigUint::from(idx) * b58.pow((prefix_len - 1 - i) as u32);
     }
     let mut s_val = BigUint::zero();
     for (i, c) in suffix.chars().enumerate() {
         let idx = BS58_ALPHABET.find(c).unwrap();
-        s_val += BigUint::from(idx) * b58.pow((suffix_len - 1 - i) as u32);
+        s_val +=
+            BigUint::from(idx) * b58.pow((suffix_len - 1 - i) as u32);
     }
 
     let m_big = BigUint::one() << (8 * n_bytes);
@@ -226,7 +239,8 @@ fn bs58_pure_prefix_suffix_prob(prefix: &str, suffix: &str, n_bytes: usize) -> f
 
     let mut total = BigUint::zero();
     let modulus = b58.pow(suffix_len as u32);
-    let start_l = std::cmp::max(std::cmp::max(prefix_len, suffix_len), 1);
+    let start_l =
+        std::cmp::max(std::cmp::max(prefix_len, suffix_len), 1);
 
     for l in start_l..=l_max {
         let pow_lk = b58.pow((l - prefix_len) as u32);
@@ -249,7 +263,8 @@ fn bs58_pure_prefix_suffix_prob(prefix: &str, suffix: &str, n_bytes: usize) -> f
         if first >= high_pref {
             continue;
         }
-        let cnt = BigUint::one() + (&high_pref - BigUint::one() - &first) / &modulus;
+        let cnt = BigUint::one()
+            + (&high_pref - BigUint::one() - &first) / &modulus;
         total += cnt;
     }
 
@@ -283,8 +298,15 @@ fn bs58_ci_factor(prefix: &str, suffix: &str) -> f64 {
         .product()
 }
 
-fn bs58_probability(prefix: &str, suffix: &str, case_insensitive: bool) -> f64 {
-    let zeros = prefix.chars().take_while(|&c| c == '1').count();
+fn bs58_probability(
+    prefix: &str,
+    suffix: &str,
+    case_insensitive: bool,
+) -> f64 {
+    let zeros = prefix
+        .chars()
+        .take_while(|&c| c == '1')
+        .count();
     let pre_nz = &prefix[zeros..];
     let p_zero = if pre_nz.is_empty() {
         (1.0_f64 / 256.0).powi(zeros as i32)
@@ -302,7 +324,11 @@ fn bs58_probability(prefix: &str, suffix: &str, case_insensitive: bool) -> f64 {
     }
 }
 
-fn expected_attempts(prefix: &str, suffix: &str, case_insensitive: bool) -> f64 {
+fn expected_attempts(
+    prefix: &str,
+    suffix: &str,
+    case_insensitive: bool,
+) -> f64 {
     let p = bs58_probability(prefix, suffix, case_insensitive);
     if p <= 0.0 {
         f64::INFINITY
@@ -332,7 +358,10 @@ fn format_duration(secs: f64) -> String {
 
 fn print_status(total: u64, rate: f64, elapsed: f64, expected: f64) {
     let e_time = if rate > 0.0 && expected.is_finite() {
-        format!(" | E[grind_time] = {}", format_duration(expected / rate))
+        format!(
+            " | E[grind_time] = {}",
+            format_duration(expected / rate)
+        )
     } else {
         String::new()
     };
@@ -369,7 +398,9 @@ fn spawn_hashrate_reporter(
 // ─── main ───────────────────────────────────────────────────────────────────
 
 fn main() {
-    rayon::ThreadPoolBuilder::new().build_global().unwrap();
+    rayon::ThreadPoolBuilder::new()
+        .build_global()
+        .unwrap();
 
     // Explicit Ctrl-C handler. First press winds the grind down cleanly (so
     // the final stats print and GPU contexts are released); a second press
@@ -396,7 +427,8 @@ fn main() {
 
 fn verify(args: VerifyArgs) {
     let VerifyArgs { base, owner, seed } = args;
-    let result = Pubkey::create_with_seed(&base, &seed, &owner).unwrap();
+    let result =
+        Pubkey::create_with_seed(&base, &seed, &owner).unwrap();
     println!("Results:");
     println!("  base  {base}");
     println!("  owner {owner}");
@@ -406,19 +438,35 @@ fn verify(args: VerifyArgs) {
 
 #[cfg(feature = "deploy")]
 fn deploy(args: DeployArgs) {
-    let base_keypair = read_keypair_file(&args.base).expect("failed to read base keypair");
+    let base_keypair = read_keypair_file(&args.base)
+        .expect("failed to read base keypair");
     let payer_keypair = args
         .payer
         .as_ref()
-        .map(|payer| read_keypair_file(payer).expect("failed to read payer keypair"))
+        .map(|payer| {
+            read_keypair_file(payer)
+                .expect("failed to read payer keypair")
+        })
         .unwrap_or(base_keypair.insecure_clone());
-    let authority = args.authority.unwrap_or_else(|| payer_keypair.pubkey());
+    let authority = args
+        .authority
+        .unwrap_or_else(|| payer_keypair.pubkey());
 
-    let target = Pubkey::create_with_seed(&base_keypair.pubkey(), &args.seed, &args.owner).unwrap();
+    let target = Pubkey::create_with_seed(
+        &base_keypair.pubkey(),
+        &args.seed,
+        &args.owner,
+    )
+    .unwrap();
     let rpc_client = RpcClient::new(args.rpc);
-    let buffer_len = rpc_client.get_account_data(&args.buffer).unwrap().len();
+    let buffer_len = rpc_client
+        .get_account_data(&args.buffer)
+        .unwrap()
+        .len();
     let rent = rpc_client
-        .get_minimum_balance_for_rent_exemption(UpgradeableLoaderState::size_of_program())
+        .get_minimum_balance_for_rent_exemption(
+            UpgradeableLoaderState::size_of_program(),
+        )
         .expect("failed to fetch rent");
 
     let instructions = deploy_with_max_program_len_with_seed(
@@ -431,7 +479,9 @@ fn deploy(args: DeployArgs) {
         &base_keypair.pubkey(),
         &args.seed,
     );
-    let blockhash = rpc_client.get_latest_blockhash().unwrap();
+    let blockhash = rpc_client
+        .get_latest_blockhash()
+        .unwrap();
     let signers = if args.payer.is_none() {
         vec![&base_keypair]
     } else {
@@ -474,7 +524,9 @@ pub fn deploy_with_max_program_len_with_seed(
         ),
         Instruction::new_with_bincode(
             bpf_loader_upgradeable::id(),
-            &UpgradeableLoaderInstruction::DeployWithMaxDataLen { max_data_len },
+            &UpgradeableLoaderInstruction::DeployWithMaxDataLen {
+                max_data_len,
+            },
             vec![
                 AccountMeta::new(*payer_address, true),
                 AccountMeta::new(programdata_address, false),
@@ -483,7 +535,10 @@ pub fn deploy_with_max_program_len_with_seed(
                 AccountMeta::new_readonly(sysvar::rent::id(), false),
                 AccountMeta::new_readonly(sysvar::clock::id(), false),
                 AccountMeta::new_readonly(system_program::id(), false),
-                AccountMeta::new_readonly(*upgrade_authority_address, true),
+                AccountMeta::new_readonly(
+                    *upgrade_authority_address,
+                    true,
+                ),
             ],
         ),
     ]
@@ -493,10 +548,19 @@ pub fn deploy_with_max_program_len_with_seed(
 
 fn grind(mut args: GrindArgs) {
     maybe_update_num_cpus(&mut args.num_cpus);
-    let prefix = get_validated_bs58("prefix", &args.prefix, args.case_insensitive);
-    let suffix = get_validated_bs58("suffix", &args.suffix, args.case_insensitive);
+    let prefix = get_validated_bs58(
+        "prefix",
+        &args.prefix,
+        args.case_insensitive,
+    );
+    let suffix = get_validated_bs58(
+        "suffix",
+        &args.suffix,
+        args.case_insensitive,
+    );
 
-    let expected = expected_attempts(prefix, suffix, args.case_insensitive);
+    let expected =
+        expected_attempts(prefix, suffix, args.case_insensitive);
     let prob = bs58_probability(prefix, suffix, args.case_insensitive);
     #[cfg(feature = "gpu")]
     eprintln!("using {} cpus, {} gpus", args.num_cpus, args.num_gpus);
@@ -642,7 +706,11 @@ fn grind(mut args: GrindArgs) {
     };
 
     let grind_start = Instant::now();
-    let reporter = spawn_hashrate_reporter(Arc::clone(&shutdown), expected, grind_start);
+    let reporter = spawn_hashrate_reporter(
+        Arc::clone(&shutdown),
+        expected,
+        grind_start,
+    );
 
     (0..args.num_cpus).into_par_iter().for_each(|i| {
         let timer = Instant::now();
@@ -710,7 +778,10 @@ fn grind(mut args: GrindArgs) {
     reporter.join().unwrap();
 
     let total = TOTAL_ATTEMPTS.load(Ordering::Relaxed);
-    let elapsed = grind_start.elapsed().as_secs_f64().max(1e-9);
+    let elapsed = grind_start
+        .elapsed()
+        .as_secs_f64()
+        .max(1e-9);
     let rate = total as f64 / elapsed;
     eprintln!(
         "\r\x1b[Kdone: {} attempts in {} at {} attempts/sec",
@@ -723,11 +794,21 @@ fn grind(mut args: GrindArgs) {
 // ─── grind-keypair ──────────────────────────────────────────────────────────
 
 fn grind_keypair(mut args: GrindKeypairArgs) {
+    check_write_permissions();
     maybe_update_num_cpus(&mut args.num_cpus);
-    let prefix = get_validated_bs58("prefix", &args.prefix, args.case_insensitive);
-    let suffix = get_validated_bs58("suffix", &args.suffix, args.case_insensitive);
+    let prefix = get_validated_bs58(
+        "prefix",
+        &args.prefix,
+        args.case_insensitive,
+    );
+    let suffix = get_validated_bs58(
+        "suffix",
+        &args.suffix,
+        args.case_insensitive,
+    );
 
-    let expected = expected_attempts(prefix, suffix, args.case_insensitive);
+    let expected =
+        expected_attempts(prefix, suffix, args.case_insensitive);
     let prob = bs58_probability(prefix, suffix, args.case_insensitive);
     #[cfg(feature = "gpu")]
     eprintln!(
@@ -847,7 +928,8 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                                         "\r\x1b[Kgpu {} match: {} in {:.3}s",
                                         i, &pubkey_str, time_sec
                                     );
-                                    print_keypair_result(
+                                    eprintln!("pubkey: {pubkey_str}");
+                                    save_keypair(
                                         &found_seed,
                                         &pubkey_bytes,
                                         &pubkey_str,
@@ -917,7 +999,10 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
     reporter.join().unwrap();
 
     let total = fast::total_attempts();
-    let elapsed = grind_start.elapsed().as_secs_f64().max(1e-9);
+    let elapsed = grind_start
+        .elapsed()
+        .as_secs_f64()
+        .max(1e-9);
     let rate = total as f64 / elapsed;
     eprintln!(
         "\r\x1b[Kdone: {} attempts in {} at {} attempts/sec",
@@ -930,6 +1015,7 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
 // ─── doppler ──────────────────────────────────────────────────────────────
 
 fn grind_doppler(mut args: DopplerArgs) {
+    check_write_permissions();
     maybe_update_num_cpus(&mut args.num_cpus);
     assert!(
         (1..=4).contains(&args.segments),
@@ -1018,7 +1104,8 @@ fn grind_doppler(mut args: DopplerArgs) {
                                     "\r\x1b[Kgpu {} match: {} in {:.3}s",
                                     i, &pubkey_str, time_sec
                                 );
-                                print_doppler_result(&found_seed, &pubkey_bytes, &pubkey_str);
+                                print_doppler_result(&found_seed, &pubkey_str);
+                                save_keypair(&found_seed, &pubkey_bytes, &pubkey_str);
                                 FOUND.fetch_add(1, Ordering::SeqCst);
                             }
 
@@ -1065,7 +1152,11 @@ fn grind_doppler(mut args: DopplerArgs) {
     };
 
     let grind_start = Instant::now();
-    let reporter = spawn_hashrate_reporter(Arc::clone(&shutdown), expected, grind_start);
+    let reporter = spawn_hashrate_reporter(
+        Arc::clone(&shutdown),
+        expected,
+        grind_start,
+    );
 
     let segments = args.segments as u32;
     (0..args.num_cpus).into_par_iter().for_each(|i| {
@@ -1105,7 +1196,8 @@ fn grind_doppler(mut args: DopplerArgs) {
                     time_secs,
                     (global_rate as u64).to_formatted_string(&Locale::en)
                 );
-                print_doppler_result(&seed, &pubkey_bytes, &pubkey_str);
+                print_doppler_result(&seed, &pubkey_str);
+                save_keypair(&seed, &pubkey_bytes, &pubkey_str);
                 FOUND.fetch_add(1, Ordering::SeqCst);
                 if done(target_count) {
                     break;
@@ -1123,7 +1215,10 @@ fn grind_doppler(mut args: DopplerArgs) {
     reporter.join().unwrap();
 
     let total = TOTAL_ATTEMPTS.load(Ordering::Relaxed);
-    let elapsed = grind_start.elapsed().as_secs_f64().max(1e-9);
+    let elapsed = grind_start
+        .elapsed()
+        .as_secs_f64()
+        .max(1e-9);
     let rate = total as f64 / elapsed;
     eprintln!(
         "\r\x1b[Kdone: {} attempts in {} at {} attempts/sec",
@@ -1166,15 +1261,17 @@ fn doppler_probability(required: u8) -> f64 {
     const BINOM4: [f64; 5] = [1.0, 4.0, 6.0, 4.0, 1.0]; // C(4, k)
     let mut total = 0.0;
     for k in (required as u32)..=4 {
-        total += BINOM4[k as usize] * p.powi(k as i32) * q.powi((4 - k) as i32);
+        total += BINOM4[k as usize]
+            * p.powi(k as i32)
+            * q.powi((4 - k) as i32);
     }
     total
 }
 
 /// Print the matched keypair plus a per-segment breakdown, including the
 /// assembly `.equ` constants the doppler-keygen reference emits.
-fn print_doppler_result(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
-    print_keypair_result(seed, pubkey, pubkey_str);
+fn print_doppler_result(pubkey: &[u8; 32], pubkey_str: &str) {
+    eprintln!("pubkey: {pubkey_str}");
     eprintln!(
         "doppler: {}/4 sign-extendable segment(s)",
         doppler_count_segments(pubkey)
@@ -1191,7 +1288,12 @@ fn print_doppler_result(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
             && pubkey[o + 6] == fill
             && pubkey[o + 7] == fill;
         if sign_extendable {
-            let imm = i32::from_le_bytes([pubkey[o], pubkey[o + 1], pubkey[o + 2], pubkey[o + 3]]);
+            let imm = i32::from_le_bytes([
+                pubkey[o],
+                pubkey[o + 1],
+                pubkey[o + 2],
+                pubkey[o + 3],
+            ]);
             eprintln!(
                 "  seg {s} (bytes {}-{}): imm32 {} (0x{:08x})  =>  .equ EXPECTED_KEY_{s}, 0x{:08x}",
                 o,
@@ -1201,7 +1303,8 @@ fn print_doppler_result(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
                 imm as u32
             );
         } else {
-            let full = u64::from_le_bytes(array::from_fn(|j| pubkey[o + j]));
+            let full =
+                u64::from_le_bytes(array::from_fn(|j| pubkey[o + j]));
             eprintln!(
                 "  seg {s} (bytes {}-{}): 0x{:016x} (not sign-extendable)  =>  .equ EXPECTED_KEY_{s}, 0x{:016x}",
                 o,
@@ -1222,16 +1325,61 @@ fn format_target_label(prefix: &str, suffix: &str) -> String {
     }
 }
 
-fn print_keypair_result(seed: &[u8; 32], pubkey: &[u8; 32], pubkey_str: &str) {
-    let seed_hex: String = seed.iter().map(|b| format!("{b:02x}")).collect();
-    eprintln!("pubkey:   {pubkey_str}");
-    eprintln!("seed hex: {seed_hex}");
-    let keypair_json: Vec<u8> = seed.iter().chain(pubkey.iter()).copied().collect();
-    eprintln!("keypair json (solana-compatible): {:?}", keypair_json);
+pub(crate) fn save_keypair(
+    seed: &[u8; 32],
+    pubkey: &[u8; 32],
+    pubkey_str: &str,
+) {
+    let bytes: Vec<u8> = seed
+        .iter()
+        .chain(pubkey.iter())
+        .copied()
+        .collect();
+
+    let path = format!("{pubkey_str}.json");
+    let json = format!("{bytes:?}");
+
+    // Create file with mode 0600 so we don't expose the private key
+    // to other users on the box.
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true)
+        .create(true)
+        .truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+
+    match opts
+        .open(&path)
+        .and_then(|mut f| f.write_all(json.as_bytes()))
+    {
+        Ok(_) => println!("keypair generated at: ./{}", path),
+        Err(err) => {
+            eprintln!("failed to write keypair to {path}: {err}")
+        }
+    }
 }
 
-fn get_validated_bs58(label: &str, value: &Option<String>, case_insensitive: bool) -> &'static str {
-    const BS58_CHARS: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+fn check_write_permissions() {
+    let current_dir =
+        std::env::current_dir().expect("we should've a dir");
+    let md = fs::metadata(current_dir).unwrap();
+    let permissions = md.permissions();
+    let readonly = permissions.readonly();
+    if readonly {
+        panic!("You're trying to grind a keypair but there's no write permissions on the current dir");
+    }
+}
+
+fn get_validated_bs58(
+    label: &str,
+    value: &Option<String>,
+    case_insensitive: bool,
+) -> &'static str {
+    const BS58_CHARS: &str =
+        "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
     if let Some(ref s) = value {
         for c in s.chars() {
             assert!(
@@ -1245,7 +1393,10 @@ fn get_validated_bs58(label: &str, value: &Option<String>, case_insensitive: boo
     ""
 }
 
-fn maybe_bs58_aware_lowercase(target: &str, case_insensitive: bool) -> String {
+fn maybe_bs58_aware_lowercase(
+    target: &str,
+    case_insensitive: bool,
+) -> String {
     if case_insensitive {
         target
             .chars()
@@ -1256,32 +1407,46 @@ fn maybe_bs58_aware_lowercase(target: &str, case_insensitive: bool) -> String {
     }
 }
 
-fn matches_target(pubkey: &str, prefix: &str, suffix: &str, case_insensitive: bool) -> bool {
+fn matches_target(
+    pubkey: &str,
+    prefix: &str,
+    suffix: &str,
+    case_insensitive: bool,
+) -> bool {
     if case_insensitive {
         (prefix.is_empty() || bs58_ci_matches(pubkey, prefix, true))
-            && (suffix.is_empty() || bs58_ci_matches(pubkey, suffix, false))
+            && (suffix.is_empty()
+                || bs58_ci_matches(pubkey, suffix, false))
     } else {
         pubkey.starts_with(prefix) && pubkey.ends_with(suffix)
     }
 }
 
-fn bs58_ci_matches(haystack: &str, pattern: &str, prefix: bool) -> bool {
+fn bs58_ci_matches(
+    haystack: &str,
+    pattern: &str,
+    prefix: bool,
+) -> bool {
     let h = if prefix {
         &haystack[..pattern.len().min(haystack.len())]
     } else {
-        let start = haystack.len().saturating_sub(pattern.len());
+        let start = haystack
+            .len()
+            .saturating_sub(pattern.len());
         &haystack[start..]
     };
     if h.len() != pattern.len() {
         return false;
     }
-    h.bytes().zip(pattern.bytes()).all(|(a, b)| {
-        if b == b'L' {
-            a == b'L'
-        } else {
-            a.to_ascii_lowercase() == b
-        }
-    })
+    h.bytes()
+        .zip(pattern.bytes())
+        .all(|(a, b)| {
+            if b == b'L' {
+                a == b'L'
+            } else {
+                a.to_ascii_lowercase() == b
+            }
+        })
 }
 
 #[cfg(feature = "gpu")]
@@ -1296,7 +1461,10 @@ extern "C" {
         suffix_len: u64,
         case_insensitive: bool,
     ) -> *mut std::ffi::c_void;
-    pub fn gpu_grind_launch(ctx: *mut std::ffi::c_void, seed: *const u8);
+    pub fn gpu_grind_launch(
+        ctx: *mut std::ffi::c_void,
+        seed: *const u8,
+    );
     pub fn gpu_grind_query(ctx: *mut std::ffi::c_void) -> i32;
     pub fn gpu_grind_read(ctx: *mut std::ffi::c_void, out: *mut u8);
     pub fn gpu_grind_destroy(ctx: *mut std::ffi::c_void);
@@ -1309,13 +1477,22 @@ extern "C" {
         suffix_len: u64,
         case_insensitive: bool,
     ) -> *mut std::ffi::c_void;
-    pub fn gpu_keypair_launch(ctx: *mut std::ffi::c_void, seed: *const u8);
+    pub fn gpu_keypair_launch(
+        ctx: *mut std::ffi::c_void,
+        seed: *const u8,
+    );
     pub fn gpu_keypair_query(ctx: *mut std::ffi::c_void) -> i32;
     pub fn gpu_keypair_read(ctx: *mut std::ffi::c_void, out: *mut u8);
     pub fn gpu_keypair_destroy(ctx: *mut std::ffi::c_void);
 
-    pub fn gpu_doppler_init(id: i32, required_segments: u32) -> *mut std::ffi::c_void;
-    pub fn gpu_doppler_launch(ctx: *mut std::ffi::c_void, seed: *const u8);
+    pub fn gpu_doppler_init(
+        id: i32,
+        required_segments: u32,
+    ) -> *mut std::ffi::c_void;
+    pub fn gpu_doppler_launch(
+        ctx: *mut std::ffi::c_void,
+        seed: *const u8,
+    );
     pub fn gpu_doppler_query(ctx: *mut std::ffi::c_void) -> i32;
     pub fn gpu_doppler_read(ctx: *mut std::ffi::c_void, out: *mut u8);
     pub fn gpu_doppler_destroy(ctx: *mut std::ffi::c_void);
