@@ -8,7 +8,7 @@ use check_match::MatchTarget;
 use field::{batch_invert, Fe};
 use group::{edwards_d2, Niels, Point};
 
-use crate::{print_keypair, save_keypair};
+use crate::{check_write_permissions, print_keypair, save_keypair};
 use sha2::{Digest, Sha512};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -196,6 +196,7 @@ unsafe fn keygen_batch_simd(
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512ifma,avx512dq")]
 unsafe fn grind_thread_simd(target: &MatchTarget, count: u32) {
+    check_write_permissions();
     let mut seeds: [[u8; 32]; BATCH] = [[0u8; 32]; BATCH];
     for s in seeds.iter_mut() {
         *s = rand::random();
@@ -230,6 +231,7 @@ unsafe fn grind_thread_simd(target: &MatchTarget, count: u32) {
 }
 
 fn grind_thread_scalar(target: &MatchTarget, count: u32) {
+    check_write_permissions();
     let mut seeds: [[u8; 32]; BATCH] = [[0u8; 32]; BATCH];
     for s in seeds.iter_mut() {
         *s = rand::random();

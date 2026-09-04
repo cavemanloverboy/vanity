@@ -794,6 +794,7 @@ fn grind(mut args: GrindArgs) {
 // ─── grind-keypair ──────────────────────────────────────────────────────────
 
 fn grind_keypair(mut args: GrindKeypairArgs) {
+    check_write_permissions();
     maybe_update_num_cpus(&mut args.num_cpus);
     let prefix = get_validated_bs58(
         "prefix",
@@ -1018,6 +1019,7 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
 // ─── doppler ──────────────────────────────────────────────────────────────
 
 fn grind_doppler(mut args: DopplerArgs) {
+    check_write_permissions();
     maybe_update_num_cpus(&mut args.num_cpus);
     assert!(
         (1..=4).contains(&args.segments),
@@ -1376,11 +1378,25 @@ pub(crate) fn save_keypair(
         opts.mode(0o600);
     }
 
-    if let Err(err) = opts
+    match opts
         .open(&path)
         .and_then(|mut f| f.write_all(json.as_bytes()))
     {
-        eprintln!("failed to write keypair to {path}: {err}");
+        Ok(_) => println!("Keypair generated at: ./{}", path),
+        Err(err) => {
+            eprintln!("failed to write keypair to {path}: {err}")
+        }
+    }
+}
+
+fn check_write_permissions() {
+    let current_dir =
+        std::env::current_dir().expect("we should've a dir");
+    let md = fs::metadata(current_dir).unwrap();
+    let permissions = md.permissions();
+    let readonly = permissions.readonly();
+    if readonly {
+        panic!("You're trying to grind a keypair but there's no write permissions on the current dir");
     }
 }
 
