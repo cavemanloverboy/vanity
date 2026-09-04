@@ -8,7 +8,7 @@ use check_match::MatchTarget;
 use field::{batch_invert, Fe};
 use group::{edwards_d2, Niels, Point};
 
-use crate::{check_write_permissions, print_keypair, save_keypair};
+use crate::{check_write_permissions, save_keypair};
 use sha2::{Digest, Sha512};
 use std::sync::{
     atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -221,7 +221,7 @@ unsafe fn grind_thread_simd(target: &MatchTarget, count: u32) {
                 if prev < count {
                     let s = fd_bs58::encode_32(pubkeys[j]);
                     eprintln!("\r\x1b[Kmatch: {s}");
-                    print_keypair(&used[j], &pubkeys[j], &s);
+                    eprintln!(pubkey: "{s}");
                     save_keypair(&used[j], &pubkeys[j], &s);
                 }
             }
@@ -256,7 +256,7 @@ fn grind_thread_scalar(target: &MatchTarget, count: u32) {
                 if prev < count {
                     let s = fd_bs58::encode_32(pubkeys[j]);
                     eprintln!("\r\x1b[Kmatch: {s}");
-                    print_keypair(&used[j], &pubkeys[j], &s);
+                    eprintln!("pubkey: {s}");
                     save_keypair(&used[j], &pubkeys[j], &s);
                 }
             }

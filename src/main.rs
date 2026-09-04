@@ -928,11 +928,7 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                                         "\r\x1b[Kgpu {} match: {} in {:.3}s",
                                         i, &pubkey_str, time_sec
                                     );
-                                    print_keypair(
-                                        &found_seed,
-                                        &pubkey_bytes,
-                                        &pubkey_str,
-                                    );
+                                    eprintln!("pubkey: {pubkey_str}");
                                     save_keypair(
                                         &found_seed,
                                         &pubkey_bytes,
@@ -1108,7 +1104,7 @@ fn grind_doppler(mut args: DopplerArgs) {
                                     "\r\x1b[Kgpu {} match: {} in {:.3}s",
                                     i, &pubkey_str, time_sec
                                 );
-                                print_doppler_result(&found_seed, &pubkey_bytes, &pubkey_str);
+                                print_doppler_result(&found_seed, &pubkey_str);
                                 save_keypair(&found_seed, &pubkey_bytes, &pubkey_str);
                                 FOUND.fetch_add(1, Ordering::SeqCst);
                             }
@@ -1200,7 +1196,7 @@ fn grind_doppler(mut args: DopplerArgs) {
                     time_secs,
                     (global_rate as u64).to_formatted_string(&Locale::en)
                 );
-                print_doppler_result(&seed, &pubkey_bytes, &pubkey_str);
+                print_doppler_result(&seed, &pubkey_str);
                 save_keypair(&seed, &pubkey_bytes, &pubkey_str);
                 FOUND.fetch_add(1, Ordering::SeqCst);
                 if done(target_count) {
@@ -1274,12 +1270,8 @@ fn doppler_probability(required: u8) -> f64 {
 
 /// Print the matched keypair plus a per-segment breakdown, including the
 /// assembly `.equ` constants the doppler-keygen reference emits.
-fn print_doppler_result(
-    seed: &[u8; 32],
-    pubkey: &[u8; 32],
-    pubkey_str: &str,
-) {
-    print_keypair(seed, pubkey, pubkey_str);
+fn print_doppler_result(pubkey: &[u8; 32], pubkey_str: &str) {
+    eprintln!("pubkey: {pubkey_str}");
     eprintln!(
         "doppler: {}/4 sign-extendable segment(s)",
         doppler_count_segments(pubkey)
@@ -1333,20 +1325,6 @@ fn format_target_label(prefix: &str, suffix: &str) -> String {
     }
 }
 
-pub(crate) fn print_keypair(
-    seed: &[u8; 32],
-    pubkey: &[u8; 32],
-    pubkey_str: &str,
-) {
-    eprintln!("pubkey:   {pubkey_str}");
-    let keypair_json: Vec<u8> = seed
-        .iter()
-        .chain(pubkey.iter())
-        .copied()
-        .collect();
-    eprintln!("keypair json (solana-compatible): {:?}", keypair_json);
-}
-
 pub(crate) fn save_keypair(
     seed: &[u8; 32],
     pubkey: &[u8; 32],
@@ -1377,7 +1355,7 @@ pub(crate) fn save_keypair(
         .open(&path)
         .and_then(|mut f| f.write_all(json.as_bytes()))
     {
-        Ok(_) => println!("Keypair generated at: ./{}", path),
+        Ok(_) => println!("keypair generated at: ./{}", path),
         Err(err) => {
             eprintln!("failed to write keypair to {path}: {err}")
         }
