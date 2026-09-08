@@ -15,6 +15,7 @@ fn build_cuda_libs() {
     let mut build = cc::Build::new();
     build
         .cuda(true)
+        .debug(false) // otherwise `debug = true` in the profile becomes `nvcc -G`
         .include("kernels")
         .file("kernels/utils.cu")
         .file("kernels/vanity.cu")
