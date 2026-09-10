@@ -187,13 +187,13 @@ pub struct DeployArgs {
 
 // ─── globals ────────────────────────────────────────────────────────────────
 
-static FOUND: AtomicU32 = AtomicU32::new(0);
-static TOTAL_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static FOUND: AtomicU32 = AtomicU32::new(0);
+pub(crate) static TOTAL_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 /// Set by the Ctrl-C handler; makes every grind loop wind down. Needed
 /// because with no explicit handler, SIGINT relies on the kernel's default
 /// terminate action — which does not apply when the process is PID 1 in a
 /// container (common on GPU cloud hosts), so Ctrl-C would otherwise be ignored.
-static ABORTED: AtomicBool = AtomicBool::new(false);
+pub(crate) static ABORTED: AtomicBool = AtomicBool::new(false);
 
 fn done(target: u32) -> bool {
     FOUND.load(Ordering::SeqCst) >= target
@@ -394,6 +394,94 @@ fn spawn_hashrate_reporter(
     })
 }
 
+// ─── gpu_worker_loop ────────────────────────────────────────────────────────────────
+
+#[cfg(feature = "gpu")]
+use std::ffi::c_void;
+
+#[cfg(feature = "gpu")]
+struct GpuOps {
+    launch: unsafe extern "C" fn(*mut c_void, *const u8),
+    query: unsafe extern "C" fn(*mut c_void) -> i32,
+    read: unsafe extern "C" fn(*mut c_void, *mut u8),
+    destroy: unsafe extern "C" fn(*mut c_void),
+}
+
+/// Drive `num_gpus` async kernel launches until the grind is done.
+///
+/// `OUT` is the kernel's output buffer size; its last 8 bytes are the
+/// `le` attempt count. `on_result(gpu, payload, secs)` gets the full `OUT`
+/// bytes and decides whether it's a match.
+#[cfg(feature = "gpu")]
+fn run_gpu_workers<const OUT: usize>(
+    num_gpus: u32,
+    ops: GpuOps,
+    init: impl Fn(u32) -> *mut c_void,
+    done: impl Fn() -> bool,
+    mut on_result: impl FnMut(usize, &[u8], f64),
+) {
+    let contexts: Vec<*mut c_void> = (0..num_gpus).map(&init).collect();
+    let mut launch_times = vec![Instant::now(); num_gpus as usize];
+    let mut in_flight = vec![false; num_gpus as usize];
+
+    let read = |ctx: *mut c_void| -> ([u8; OUT], u64) {
+        let mut out = [0u8; OUT];
+        unsafe { (ops.read)(ctx, out.as_mut_ptr()) };
+        let count =
+            u64::from_le_bytes(array::from_fn(|j| out[OUT - 8 + j]));
+        (out, count)
+    };
+
+    for (i, &ctx) in contexts.iter().enumerate() {
+        let seed = new_gpu_seed(i as u32);
+        launch_times[i] = Instant::now();
+        unsafe { (ops.launch)(ctx, seed.as_ptr()) };
+        in_flight[i] = true;
+    }
+
+    loop {
+        if done() {
+            break;
+        }
+        let mut any_ready = false;
+
+        for (i, &ctx) in contexts.iter().enumerate() {
+            if !in_flight[i] || unsafe { (ops.query)(ctx) } == 0 {
+                continue;
+            }
+            any_ready = true;
+
+            let secs = launch_times[i].elapsed().as_secs_f64();
+            let (out, count) = read(ctx);
+            TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
+            on_result(i, &out, secs);
+
+            in_flight[i] = false;
+            if !done() {
+                let seed = new_gpu_seed(i as u32);
+                launch_times[i] = Instant::now();
+                unsafe { (ops.launch)(ctx, seed.as_ptr()) };
+                in_flight[i] = true;
+            }
+        }
+        if !any_ready {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    for (i, &ctx) in contexts.iter().enumerate() {
+        if !in_flight[i] {
+            continue;
+        }
+        while unsafe { (ops.query)(ctx) } == 0 {
+            thread::sleep(Duration::from_millis(10));
+        }
+        TOTAL_ATTEMPTS.fetch_add(read(ctx).1, Ordering::Relaxed);
+    }
+    for ctx in contexts {
+        unsafe { (ops.destroy)(ctx) };
+    }
+}
 // ─── main ───────────────────────────────────────────────────────────────────
 
 fn main() {
@@ -586,9 +674,15 @@ fn grind(mut args: GrindArgs) {
             thread::Builder::new()
                 .name("gpu_mgr".into())
                 .spawn(move || {
-                    let mut contexts = Vec::with_capacity(num_gpus as usize);
-                    for id in 0..num_gpus {
-                        let ctx = unsafe {
+                    run_gpu_workers::<24>(
+                        num_gpus,
+                        GpuOps {
+                            launch: gpu_grind_launch,
+                            query: gpu_grind_query,
+                            read: gpu_grind_read,
+                            destroy: gpu_grind_destroy,
+                        },
+                        |id| unsafe {
                             gpu_grind_init(
                                 id as i32,
                                 base.as_ref().as_ptr(),
@@ -599,47 +693,9 @@ fn grind(mut args: GrindArgs) {
                                 suffix.len() as u64,
                                 ci,
                             )
-                        };
-                        contexts.push(ctx);
-                    }
-
-                    let mut iterations = vec![0u64; num_gpus as usize];
-                    let mut launch_times = vec![Instant::now(); num_gpus as usize];
-                    let mut in_flight = vec![false; num_gpus as usize];
-
-                    for (i, &ctx) in contexts.iter().enumerate() {
-                        let seed = new_gpu_seed(i as u32, 0);
-                        launch_times[i] = Instant::now();
-                        unsafe {
-                            gpu_grind_launch(ctx, seed.as_ptr());
-                        }
-                        in_flight[i] = true;
-                    }
-
-                    loop {
-                        if done(target_count) {
-                            break;
-                        }
-
-                        let mut any_ready = false;
-                        for (i, &ctx) in contexts.iter().enumerate() {
-                            if !in_flight[i] {
-                                continue;
-                            }
-                            if unsafe { gpu_grind_query(ctx) } == 0 {
-                                continue;
-                            }
-                            any_ready = true;
-
-                            let time_sec = launch_times[i].elapsed().as_secs_f64();
-                            let mut out = [0u8; 24];
-                            unsafe {
-                                gpu_grind_read(ctx, out.as_mut_ptr());
-                            }
-
-                            let count = u64::from_le_bytes(array::from_fn(|j| out[16 + j]));
-                            TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
-
+                        },
+                        || done(target_count),
+                        |i, out, time_sec| {
                             let reconstructed: [u8; 32] = Sha256::new()
                                 .chain_update(base)
                                 .chain_update(&out[..16])
@@ -647,9 +703,11 @@ fn grind(mut args: GrindArgs) {
                                 .finalize()
                                 .into();
                             let out_str = fd_bs58::encode_32(reconstructed);
-                            let out_str_check = maybe_bs58_aware_lowercase(&out_str, ci);
+                            let out_str_check =
+                                maybe_bs58_aware_lowercase(&out_str, ci);
 
-                            if out_str_check.starts_with(prefix) && out_str_check.ends_with(suffix)
+                            if out_str_check.starts_with(prefix)
+                                && out_str_check.ends_with(suffix)
                             {
                                 eprintln!(
                                     "\r\x1b[Kgpu {} match: {} in {:.3}s",
@@ -661,42 +719,8 @@ fn grind(mut args: GrindArgs) {
                                 );
                                 FOUND.fetch_add(1, Ordering::SeqCst);
                             }
-
-                            in_flight[i] = false;
-                            if !done(target_count) {
-                                iterations[i] += 1;
-                                let seed = new_gpu_seed(i as u32, iterations[i]);
-                                launch_times[i] = Instant::now();
-                                unsafe {
-                                    gpu_grind_launch(ctx, seed.as_ptr());
-                                }
-                                in_flight[i] = true;
-                            }
-                        }
-
-                        if !any_ready {
-                            thread::sleep(Duration::from_millis(10));
-                        }
-                    }
-
-                    for (i, &ctx) in contexts.iter().enumerate() {
-                        if in_flight[i] {
-                            while unsafe { gpu_grind_query(ctx) } == 0 {
-                                thread::sleep(Duration::from_millis(10));
-                            }
-                            let mut out = [0u8; 24];
-                            unsafe {
-                                gpu_grind_read(ctx, out.as_mut_ptr());
-                            }
-                            let count = u64::from_le_bytes(array::from_fn(|j| out[16 + j]));
-                            TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
-                        }
-                    }
-                    for ctx in contexts {
-                        unsafe {
-                            gpu_grind_destroy(ctx);
-                        }
-                    }
+                        },
+                    )
                 })
                 .unwrap(),
         )
@@ -861,9 +885,15 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
             thread::Builder::new()
                 .name("gpu_mgr".into())
                 .spawn(move || {
-                    let mut contexts = Vec::with_capacity(num_gpus as usize);
-                    for id in 0..num_gpus {
-                        let ctx = unsafe {
+                    run_gpu_workers::<40>(
+                        num_gpus,
+                        GpuOps {
+                            launch: gpu_keypair_launch,
+                            query: gpu_keypair_query,
+                            read: gpu_keypair_read,
+                            destroy: gpu_keypair_destroy,
+                        },
+                        |id| unsafe {
                             gpu_keypair_init(
                                 id as i32,
                                 prefix.as_ptr(),
@@ -872,54 +902,24 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                                 suffix.len() as u64,
                                 ci,
                             )
-                        };
-                        contexts.push(ctx);
-                    }
-
-                    let mut iterations = vec![0u64; num_gpus as usize];
-                    let mut launch_times = vec![Instant::now(); num_gpus as usize];
-                    let mut in_flight = vec![false; num_gpus as usize];
-
-                    for (i, &ctx) in contexts.iter().enumerate() {
-                        let seed = new_gpu_seed(i as u32, 0);
-                        launch_times[i] = Instant::now();
-                        unsafe {
-                            gpu_keypair_launch(ctx, seed.as_ptr());
-                        }
-                        in_flight[i] = true;
-                    }
-
-                    loop {
-                        if fast::is_done(target_count) || ABORTED.load(Ordering::Relaxed) {
-                            break;
-                        }
-
-                        let mut any_ready = false;
-                        for (i, &ctx) in contexts.iter().enumerate() {
-                            if !in_flight[i] {
-                                continue;
-                            }
-                            if unsafe { gpu_keypair_query(ctx) } == 0 {
-                                continue;
-                            }
-                            any_ready = true;
-
-                            let time_sec = launch_times[i].elapsed().as_secs_f64();
-                            let mut out = [0u8; 40];
-                            unsafe {
-                                gpu_keypair_read(ctx, out.as_mut_ptr());
-                            }
-
-                            let found_seed: [u8; 32] = out[..32].try_into().unwrap();
-                            let signing_key = SigningKey::from_bytes(&found_seed);
-                            let pubkey_bytes = signing_key.verifying_key().to_bytes();
+                        },
+                        || {
+                            fast::is_done(target_count)
+                                || ABORTED.load(Ordering::Relaxed)
+                        },
+                        |i, out, time_sec| {
+                            let found_seed: [u8; 32] =
+                                out[..32].try_into().unwrap();
+                            let signing_key =
+                                SigningKey::from_bytes(&found_seed);
+                            let pubkey_bytes =
+                                signing_key.verifying_key().to_bytes();
                             let pubkey_str = fd_bs58::encode_32(pubkey_bytes);
-                            let pubkey_check = maybe_bs58_aware_lowercase(&pubkey_str, ci);
-                            let count = u64::from_le_bytes(array::from_fn(|j| out[32 + j]));
+                            let pubkey_check =
+                                maybe_bs58_aware_lowercase(&pubkey_str, ci);
 
-                            fast::add_attempts(count);
-
-                            if pubkey_check.starts_with(prefix) && pubkey_check.ends_with(suffix)
+                            if pubkey_check.starts_with(prefix)
+                                && pubkey_check.ends_with(suffix)
                             {
                                 let prev = fast::note_found();
                                 if prev < target_count {
@@ -935,42 +935,8 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                                     );
                                 }
                             }
-
-                            in_flight[i] = false;
-                            if !fast::is_done(target_count) && !ABORTED.load(Ordering::Relaxed) {
-                                iterations[i] += 1;
-                                let seed = new_gpu_seed(i as u32, iterations[i]);
-                                launch_times[i] = Instant::now();
-                                unsafe {
-                                    gpu_keypair_launch(ctx, seed.as_ptr());
-                                }
-                                in_flight[i] = true;
-                            }
-                        }
-
-                        if !any_ready {
-                            thread::sleep(Duration::from_millis(10));
-                        }
-                    }
-
-                    for (i, &ctx) in contexts.iter().enumerate() {
-                        if in_flight[i] {
-                            while unsafe { gpu_keypair_query(ctx) } == 0 {
-                                thread::sleep(Duration::from_millis(10));
-                            }
-                            let mut out = [0u8; 40];
-                            unsafe {
-                                gpu_keypair_read(ctx, out.as_mut_ptr());
-                            }
-                            let count = u64::from_le_bytes(array::from_fn(|j| out[32 + j]));
-                            fast::add_attempts(count);
-                        }
-                    }
-                    for ctx in contexts {
-                        unsafe {
-                            gpu_keypair_destroy(ctx);
-                        }
-                    }
+                        },
+                    )
                 })
                 .unwrap(),
         )
@@ -1050,55 +1016,28 @@ fn grind_doppler(mut args: DopplerArgs) {
             thread::Builder::new()
                 .name("gpu_mgr".into())
                 .spawn(move || {
-                    let mut contexts = Vec::with_capacity(num_gpus as usize);
-                    for id in 0..num_gpus {
-                        let ctx = unsafe { gpu_doppler_init(id as i32, segments) };
-                        contexts.push(ctx);
-                    }
+                    run_gpu_workers::<40>(
+                        num_gpus,
+                        GpuOps {
+                            launch: gpu_doppler_launch,
+                            query: gpu_doppler_query,
+                            read: gpu_doppler_read,
+                            destroy: gpu_doppler_destroy,
+                        },
+                        |id| unsafe { gpu_doppler_init(id as i32, segments) },
+                        || done(target_count),
+                        |i, out, time_sec| {
+                            let found_seed: [u8; 32] =
+                                out[..32].try_into().unwrap();
+                            let signing_key =
+                                SigningKey::from_bytes(&found_seed);
+                            let pubkey_bytes =
+                                signing_key.verifying_key().to_bytes();
 
-                    let mut iterations = vec![0u64; num_gpus as usize];
-                    let mut launch_times = vec![Instant::now(); num_gpus as usize];
-                    let mut in_flight = vec![false; num_gpus as usize];
-
-                    for (i, &ctx) in contexts.iter().enumerate() {
-                        let seed = new_gpu_seed(i as u32, 0);
-                        launch_times[i] = Instant::now();
-                        unsafe {
-                            gpu_doppler_launch(ctx, seed.as_ptr());
-                        }
-                        in_flight[i] = true;
-                    }
-
-                    loop {
-                        if done(target_count) {
-                            break;
-                        }
-
-                        let mut any_ready = false;
-                        for (i, &ctx) in contexts.iter().enumerate() {
-                            if !in_flight[i] {
-                                continue;
-                            }
-                            if unsafe { gpu_doppler_query(ctx) } == 0 {
-                                continue;
-                            }
-                            any_ready = true;
-
-                            let time_sec = launch_times[i].elapsed().as_secs_f64();
-                            let mut out = [0u8; 40];
-                            unsafe {
-                                gpu_doppler_read(ctx, out.as_mut_ptr());
-                            }
-
-                            let found_seed: [u8; 32] = out[..32].try_into().unwrap();
-                            let signing_key = SigningKey::from_bytes(&found_seed);
-                            let pubkey_bytes = signing_key.verifying_key().to_bytes();
-                            let count = u64::from_le_bytes(array::from_fn(|j| out[32 + j]));
-
-                            TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
-
-                            if doppler_count_segments(&pubkey_bytes) >= segments {
-                                let pubkey_str = fd_bs58::encode_32(pubkey_bytes);
+                            if doppler_count_segments(&pubkey_bytes) >= segments
+                            {
+                                let pubkey_str =
+                                    fd_bs58::encode_32(pubkey_bytes);
                                 eprintln!(
                                     "\r\x1b[Kgpu {} match: {} in {:.3}s",
                                     i, pubkey_str, time_sec
@@ -1107,42 +1046,8 @@ fn grind_doppler(mut args: DopplerArgs) {
                                 save_keypair(&found_seed, &pubkey_bytes, &pubkey_str);
                                 FOUND.fetch_add(1, Ordering::SeqCst);
                             }
-
-                            in_flight[i] = false;
-                            if !done(target_count) {
-                                iterations[i] += 1;
-                                let seed = new_gpu_seed(i as u32, iterations[i]);
-                                launch_times[i] = Instant::now();
-                                unsafe {
-                                    gpu_doppler_launch(ctx, seed.as_ptr());
-                                }
-                                in_flight[i] = true;
-                            }
-                        }
-
-                        if !any_ready {
-                            thread::sleep(Duration::from_millis(10));
-                        }
-                    }
-
-                    for (i, &ctx) in contexts.iter().enumerate() {
-                        if in_flight[i] {
-                            while unsafe { gpu_doppler_query(ctx) } == 0 {
-                                thread::sleep(Duration::from_millis(10));
-                            }
-                            let mut out = [0u8; 40];
-                            unsafe {
-                                gpu_doppler_read(ctx, out.as_mut_ptr());
-                            }
-                            let count = u64::from_le_bytes(array::from_fn(|j| out[32 + j]));
-                            TOTAL_ATTEMPTS.fetch_add(count, Ordering::Relaxed);
-                        }
-                    }
-                    for ctx in contexts {
-                        unsafe {
-                            gpu_doppler_destroy(ctx);
-                        }
-                    }
+                        },
+                    )
                 })
                 .unwrap(),
         )
@@ -1498,11 +1403,10 @@ extern "C" {
 }
 
 #[cfg(feature = "gpu")]
-fn new_gpu_seed(gpu_id: u32, iteration: u64) -> [u8; 32] {
+fn new_gpu_seed(gpu_id: u32) -> [u8; 32] {
     Sha256::new()
         .chain_update(rand::random::<[u8; 32]>())
         .chain_update(gpu_id.to_le_bytes())
-        .chain_update(iteration.to_le_bytes())
         .finalize()
         .into()
 }
