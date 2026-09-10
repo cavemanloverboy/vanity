@@ -59,13 +59,23 @@ No ed25519 is involved, so it's dramatically faster — but the account is
 controlled by `base` (the signer), not by a standalone keypair.
 
 You supply the `--base` pubkey (the signer for the create instruction), the
-program `--owner`, and a `--prefix` and/or `--suffix` to match (base58):
+program `--owner`, and one or more `--pattern`s to match (base58). A pubkey
+hits if it matches **any** pattern. `...` splits prefix and suffix (`.` is
+not in base58):
 
 ```bash
 vanity grind \
   --base <YOUR_WALLET_PUBKEY> \
   --owner BPFLoaderUpgradeab1e11111111111111111111111 \
-  --prefix abc \
+  --pattern abc... \
+  --num-gpus 1
+
+# several targets in one run (OR):
+vanity grind \
+  --base <YOUR_WALLET_PUBKEY> \
+  --owner BPFLoaderUpgradeab1e11111111111111111111111 \
+  --pattern Cavey...CooL \
+  --pattern Harmonic... \
   --num-gpus 1
 ```
 
@@ -103,15 +113,16 @@ pub fn create_account_with_seed(
 
 ### Grind a vanity keypair
 
-`grind-keypair` searches genuine ed25519 keypairs whose **public key** matches a
-base58 `--prefix` and/or `--suffix`. This is the classic "vanity wallet/mint"
-case: the result is a standalone keypair you can sign with. It's slower than
-`grind` because each attempt computes an ed25519 scalar multiplication. The CPU
-path uses a batched custom ed25519 implementation (AVX-512 IFMA when available);
-GPUs use the CUDA/OpenCL keypair kernels.
+`grind-keypair` searches genuine ed25519 keypairs whose **public key** matches
+any `--pattern` (same `Prefix...Suffix` syntax as `grind`). This is the classic
+"vanity wallet/mint" case: the result is a standalone keypair you can sign
+with. It's slower than `grind` because each attempt computes an ed25519 scalar
+multiplication. The CPU path uses a batched custom ed25519 implementation
+(AVX-512 IFMA when available); GPUs use the CUDA/OpenCL keypair kernels.
 
 ```bash
-vanity grind-keypair --prefix bob --suffix xyz --num-gpus 1
+vanity grind-keypair --pattern bob...xyz --num-gpus 1
+vanity grind-keypair --pattern Cavey...CooL --pattern Harmonic... --num-gpus 1
 ```
 
 On a match it prints the public key, the seed (hex), and a Solana-compatible
@@ -176,8 +187,8 @@ doppler: 1/4 sign-extendable segment(s)
 | `--num-cpus <N>` | all | `0` (= all logical cores) | CPU mining threads |
 | `--num-gpus <N>` | all (GPU builds only) | `1` | GPUs to mine on |
 | `--count <N>` | all | `1` | stop after finding N matches |
-| `--case-insensitive` | `grind`, `grind-keypair` | off | match prefix/suffix ignoring case |
-| `--prefix` / `--suffix` | `grind`, `grind-keypair` | — | base58 target(s) to match; supply at least one |
+| `--case-insensitive` | `grind`, `grind-keypair` | off | match patterns ignoring case |
+| `--pattern` | `grind`, `grind-keypair` | — | repeatable `Prefix...Suffix` / `Prefix...` / `...Suffix`; OR'd |
 | `--segments <1-4>` | `grind-doppler` | `1` | sign-extendable segments required |
 
 To run purely on CPU (no GPU), build without a GPU feature, or pass `--num-gpus 0`.

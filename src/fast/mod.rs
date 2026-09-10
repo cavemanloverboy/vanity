@@ -4,7 +4,7 @@ mod group;
 pub mod sha512_simd;
 pub mod simd;
 
-use check_match::MatchTarget;
+pub use check_match::{MatchTargets, MAX_PATTERNS, MAX_PATTERN_LEN};
 use field::{batch_invert, Fe};
 use group::{edwards_d2, Niels, Point};
 
@@ -195,7 +195,7 @@ unsafe fn keygen_batch_simd(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512ifma,avx512dq")]
-unsafe fn grind_thread_simd(target: &MatchTarget, count: u32) {
+unsafe fn grind_thread_simd(target: &MatchTargets, count: u32) {
     check_write_permissions();
     let mut seeds: [[u8; 32]; BATCH] = [[0u8; 32]; BATCH];
     for s in seeds.iter_mut() {
@@ -230,7 +230,7 @@ unsafe fn grind_thread_simd(target: &MatchTarget, count: u32) {
     TOTAL_ATTEMPTS.fetch_add(local, Ordering::Relaxed);
 }
 
-fn grind_thread_scalar(target: &MatchTarget, count: u32) {
+fn grind_thread_scalar(target: &MatchTargets, count: u32) {
     check_write_permissions();
     let mut seeds: [[u8; 32]; BATCH] = [[0u8; 32]; BATCH];
     for s in seeds.iter_mut() {
@@ -321,15 +321,7 @@ pub fn backend_name() -> &'static str {
 /// Run batched CPU keypair workers until `count` matches or abort.
 /// Call [`reset_grind`] first if coordinating with a GPU thread that shares
 /// these counters via [`add_attempts`] / [`note_found`] / [`is_done`].
-pub fn run_cpu_workers(
-    prefix: &'static str,
-    suffix: &'static str,
-    case_insensitive: bool,
-    num_cpus: u32,
-    count: u32,
-) {
-    let target = MatchTarget::new(prefix, suffix, case_insensitive);
-
+pub fn run_cpu_workers(target: &MatchTargets, num_cpus: u32, count: u32) {
     (0..num_cpus)
         .into_par_iter()
         .for_each(|_| {

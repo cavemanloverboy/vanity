@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <cuda_runtime.h>
 #include "vanity_keypair.h"
 #include "base58.h"
@@ -17,8 +18,8 @@ __device__ static unsigned long long kp_count = 0;
 #define KP_BATCH KP_BATCH_MAX
 #endif
 
-static __global__ void __launch_bounds__(KP_MAX_THREADS)
-vanity_keypair_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles,
+template<bool MULTI>
+static __global__ void vanity_keypair_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles,
                       const ge_niels *comb);
 
 /* Device-wide nanosecond clock. clock64() is per-SM and cannot be compared
@@ -80,12 +81,12 @@ typedef struct {
     int num_threads;
     unsigned long long target_cycles;
     uint64_t out_offset;
+    int multi;
 } GpuKeypairCtx;
 
 extern "C" void* gpu_keypair_init(
     int id,
-    uint8_t *prefix, uint64_t prefix_len,
-    uint8_t *suffix, uint64_t suffix_len,
+    uint8_t *patterns, uint64_t patterns_len,
     bool case_insensitive)
 {
     cudaSetDevice(id);
@@ -97,22 +98,32 @@ extern "C" void* gpu_keypair_init(
         exit(EXIT_FAILURE);
     }
 
+    uint32_t n_pat = 0;
+    if (patterns_len >= 4) memcpy(&n_pat, patterns, 4);
+    int multi = n_pat > 1;
+    if (multi)
+        vanity_upload_pattern_table(patterns, patterns_len);
+
     int nthreads = KP_MAX_THREADS;
-    int nblocks = one_wave_blocks(vanity_keypair_search, nthreads,
-                                  prop.multiProcessorCount, "gpu_keypair_init");
+    int nblocks = multi
+        ? one_wave_blocks(vanity_keypair_search<true>, nthreads,
+                          prop.multiProcessorCount, "gpu_keypair_init")
+        : one_wave_blocks(vanity_keypair_search<false>, nthreads,
+                          prop.multiProcessorCount, "gpu_keypair_init");
 
     GpuKeypairCtx *ctx = (GpuKeypairCtx *)malloc(sizeof(GpuKeypairCtx));
     ctx->device_id   = id;
     ctx->num_blocks  = nblocks;
     ctx->num_threads = nthreads;
+    ctx->multi       = multi;
     /* 2s wall-clock slice, timed with %globaltimer (nanoseconds). */
     ctx->target_cycles = 2000000000ULL;
 
     cudaStreamCreate(&ctx->stream);
 
-    // Buffer: [seed:32] [prefix_len:8] [prefix:N] [suffix_len:8] [suffix:M] [out:32]
-    uint64_t buf_size = 32 + 8 + prefix_len + 8 + suffix_len + 32;
-    ctx->out_offset = 32 + 8 + prefix_len + 8 + suffix_len;
+    // Buffer: [seed:32] [pat_len:8] [patterns:N] [out:32]
+    uint64_t buf_size = 32 + 8 + patterns_len + 32;
+    ctx->out_offset = 32 + 8 + patterns_len;
 
     err = cudaMalloc((void**)&ctx->d_buffer, buf_size);
     if (err != cudaSuccess) {
@@ -139,29 +150,9 @@ extern "C" void* gpu_keypair_init(
             }
         }
 
-        uint8_t prefix_idx[64];
-        uint8_t suffix_idx[64];
-        for (uint64_t i = 0; i < prefix_len; ++i) {
-            uint8_t v = 255;
-            for (int k = 0; k < 58; ++k) {
-                if ((uint8_t)alphabet[k] == prefix[i]) { v = host_match_lut[k]; break; }
-            }
-            prefix_idx[i] = v;
-        }
-        for (uint64_t i = 0; i < suffix_len; ++i) {
-            uint8_t v = 255;
-            for (int k = 0; k < 58; ++k) {
-                if ((uint8_t)alphabet[k] == suffix[i]) { v = host_match_lut[k]; break; }
-            }
-            suffix_idx[i] = v;
-        }
-
-        uint64_t off = 32;
-        cudaMemcpy(ctx->d_buffer + off, &prefix_len, 8, cudaMemcpyHostToDevice); off += 8;
-        if (prefix_len > 0) cudaMemcpy(ctx->d_buffer + off, prefix_idx, prefix_len, cudaMemcpyHostToDevice);
-        off += prefix_len;
-        cudaMemcpy(ctx->d_buffer + off, &suffix_len, 8, cudaMemcpyHostToDevice); off += 8;
-        if (suffix_len > 0) cudaMemcpy(ctx->d_buffer + off, suffix_idx, suffix_len, cudaMemcpyHostToDevice);
+        cudaMemcpy(ctx->d_buffer + 32, &patterns_len, 8, cudaMemcpyHostToDevice);
+        if (patterns_len > 0)
+            cudaMemcpy(ctx->d_buffer + 40, patterns, patterns_len, cudaMemcpyHostToDevice);
 
         cudaMemcpyToSymbol(d_match_lut, host_match_lut, sizeof(host_match_lut));
     }
@@ -186,11 +177,19 @@ extern "C" void gpu_keypair_launch(void *opaque, uint8_t *seed)
     cudaMemcpyToSymbol(kp_done, &zero, sizeof(int));
     cudaMemcpyToSymbol(kp_count, &zero_ull, sizeof(unsigned long long));
 
-    vanity_keypair_search<<<ctx->num_blocks, ctx->num_threads, 0, ctx->stream>>>(
-        ctx->d_buffer,
-        (uint64_t)ctx->num_blocks * ctx->num_threads,
-        ctx->target_cycles,
-        ctx->d_comb);
+    if (ctx->multi) {
+        vanity_keypair_search<true><<<ctx->num_blocks, ctx->num_threads, 0, ctx->stream>>>(
+            ctx->d_buffer,
+            (uint64_t)ctx->num_blocks * ctx->num_threads,
+            ctx->target_cycles,
+            ctx->d_comb);
+    } else {
+        vanity_keypair_search<false><<<ctx->num_blocks, ctx->num_threads, 0, ctx->stream>>>(
+            ctx->d_buffer,
+            (uint64_t)ctx->num_blocks * ctx->num_threads,
+            ctx->target_cycles,
+            ctx->d_comb);
+    }
 
     cudaError_t launch_err = cudaGetLastError();
     if (launch_err != cudaSuccess) {
@@ -238,6 +237,7 @@ static __device__ __forceinline__ void kp_sha512_32(const unsigned char seed[32]
     sha512_32(seed, out);
 }
 
+template<bool MULTI>
 static __global__ void __launch_bounds__(KP_MAX_THREADS)
 vanity_keypair_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles,
                       const ge_niels *comb)
@@ -245,15 +245,23 @@ vanity_keypair_search(uint8_t *buffer, uint64_t stride, unsigned long long max_c
     (void)stride;
     uint8_t *host_seed = buffer;
 
-    uint64_t prefix_len;
-    memcpy(&prefix_len, buffer + 32, 8);
-    uint8_t *prefix = buffer + 40;
+    uint64_t pat_len;
+    memcpy(&pat_len, buffer + 32, 8);
+    uint8_t *patterns = buffer + 40;
+    uint8_t *out = buffer + 40 + pat_len;
 
-    uint64_t suffix_len;
-    memcpy(&suffix_len, buffer + 40 + prefix_len, 8);
-    uint8_t *suffix = buffer + 40 + prefix_len + 8;
-
-    uint8_t *out = suffix + suffix_len;
+    uint32_t n_pat = 0;
+    memcpy(&n_pat, patterns, 4);
+    const uint8_t *prefix = patterns;
+    ulong prefix_len = 0;
+    const uint8_t *suffix = patterns;
+    ulong suffix_len = 0;
+    if (n_pat == 1) {
+        prefix_len = patterns[6];
+        prefix = patterns + 7;
+        suffix_len = patterns[7 + prefix_len];
+        suffix = patterns + 8 + prefix_len;
+    }
 
     uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -325,7 +333,10 @@ vanity_keypair_search(uint8_t *buffer, uint64_t stride, unsigned long long max_c
                                 | ((uint)pubkey[4*k + 3]      );
             }
 
-            if (fd_base58_check_match_32_words(pubkey_words, prefix, prefix_len, suffix, suffix_len))
+            bool hit = MULTI
+                ? fd_base58_check_match_any_32_words(pubkey_words)
+                : fd_base58_check_match_32_words(pubkey_words, prefix, prefix_len, suffix, suffix_len);
+            if (hit)
             {
                 if (atomicMax(&kp_done, 1) == 0) {
                     memcpy(out, batch_seeds[j], 32);

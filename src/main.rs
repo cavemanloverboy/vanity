@@ -47,6 +47,24 @@ pub enum Command {
     Deploy(DeployArgs),
 }
 
+/// Repeatable vanity target: a pubkey matches if it matches any `--pattern`.
+///
+/// Syntax (`.` is not in base58, so `...` is an unambiguous split):
+///   `--pattern Cavey...CooL`   prefix `Cavey` and suffix `CooL`
+///   `--pattern Harmonic...`    prefix only
+///   `--pattern ...pump`        suffix only
+///   `--pattern Harmonic`       prefix only (the `...` may be omitted)
+#[derive(Debug, Parser)]
+pub struct PatternArgs {
+    /// Vanity pattern. Repeatable; OR'd together.
+    #[clap(long, action = clap::ArgAction::Append)]
+    pub pattern: Vec<String>,
+
+    /// Whether user cares about the case of the pubkey
+    #[clap(long, default_value_t = false)]
+    pub case_insensitive: bool,
+}
+
 #[derive(Debug, Parser)]
 pub struct GrindArgs {
     /// The pubkey that will be the signer for the CreateAccountWithSeed instruction
@@ -57,16 +75,8 @@ pub struct GrindArgs {
     #[clap(long, value_parser = parse_pubkey)]
     pub owner: Pubkey,
 
-    /// The target prefix for the pubkey
-    #[clap(long)]
-    pub prefix: Option<String>,
-
-    #[clap(long)]
-    pub suffix: Option<String>,
-
-    /// Whether user cares about the case of the pubkey
-    #[clap(long, default_value_t = false)]
-    pub case_insensitive: bool,
+    #[clap(flatten)]
+    pub spec: PatternArgs,
 
     /// Number of gpus to use for mining
     #[clap(long, default_value_t = 1)]
@@ -84,17 +94,8 @@ pub struct GrindArgs {
 
 #[derive(Debug, Parser)]
 pub struct GrindKeypairArgs {
-    /// The target prefix for the pubkey
-    #[clap(long)]
-    pub prefix: Option<String>,
-
-    /// The target suffix for the pubkey
-    #[clap(long)]
-    pub suffix: Option<String>,
-
-    /// Whether user cares about the case of the pubkey
-    #[clap(long, default_value_t = false)]
-    pub case_insensitive: bool,
+    #[clap(flatten)]
+    pub spec: PatternArgs,
 
     /// Number of gpus to use for mining
     #[clap(long, default_value_t = 1)]
@@ -323,6 +324,7 @@ fn bs58_probability(
     }
 }
 
+#[allow(dead_code)]
 fn expected_attempts(
     prefix: &str,
     suffix: &str,
@@ -333,6 +335,147 @@ fn expected_attempts(
         f64::INFINITY
     } else {
         1.0 / p
+    }
+}
+
+// ─── --pattern ──────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VanityPattern {
+    prefix: String,
+    suffix: String,
+}
+
+#[derive(Clone, Debug)]
+struct VanitySpec {
+    patterns: Vec<VanityPattern>,
+    case_insensitive: bool,
+}
+
+impl VanitySpec {
+    fn pairs(&self) -> Vec<(&str, &str)> {
+        self.patterns
+            .iter()
+            .map(|p| (p.prefix.as_str(), p.suffix.as_str()))
+            .collect()
+    }
+
+    fn matches(&self, pubkey: &str) -> bool {
+        self.patterns.iter().any(|p| {
+            matches_target(
+                pubkey,
+                &p.prefix,
+                &p.suffix,
+                self.case_insensitive,
+            )
+        })
+    }
+
+    fn label(&self) -> String {
+        self.patterns
+            .iter()
+            .map(|p| format_target_label(&p.prefix, &p.suffix))
+            .collect::<Vec<_>>()
+            .join(" | ")
+    }
+
+    fn probability(&self) -> f64 {
+        self.patterns
+            .iter()
+            .map(|p| {
+                bs58_probability(
+                    &p.prefix,
+                    &p.suffix,
+                    self.case_insensitive,
+                )
+            })
+            .sum::<f64>()
+            .min(1.0)
+    }
+
+    fn expected_attempts(&self) -> f64 {
+        let p = self.probability();
+        if p <= 0.0 {
+            f64::INFINITY
+        } else {
+            1.0 / p
+        }
+    }
+}
+
+/// Split `Prefix...Suffix`, `Prefix...`, `...Suffix`, or a bare prefix.
+fn parse_pattern(raw: &str) -> VanityPattern {
+    let (prefix, suffix) = match raw.split_once("...") {
+        Some((p, s)) => {
+            assert!(
+                !s.contains("..."),
+                "--pattern may contain only one '...' separator"
+            );
+            (p.to_string(), s.to_string())
+        }
+        None => (raw.to_string(), String::new()),
+    };
+    assert!(
+        !prefix.is_empty() || !suffix.is_empty(),
+        "--pattern must include a prefix and/or suffix (e.g. Harmonic... or ...CooL or Cavey...CooL)"
+    );
+    assert!(
+        prefix.len() <= fast::MAX_PATTERN_LEN
+            && suffix.len() <= fast::MAX_PATTERN_LEN,
+        "--pattern prefix/suffix each at most {} characters",
+        fast::MAX_PATTERN_LEN
+    );
+    VanityPattern { prefix, suffix }
+}
+
+/// `q` matches every string that `p` matches (and possibly more).
+fn dominates(q: &VanityPattern, p: &VanityPattern) -> bool {
+    p.prefix.starts_with(&q.prefix) && p.suffix.ends_with(&q.suffix)
+}
+
+fn prune_dominated(patterns: &[VanityPattern]) -> Vec<VanityPattern> {
+    let mut out = Vec::new();
+    for p in patterns {
+        if out.iter().any(|q| dominates(q, p)) {
+            continue;
+        }
+        out.retain(|q| !dominates(p, q));
+        out.push(p.clone());
+    }
+    out
+}
+
+fn resolve_spec(args: &PatternArgs) -> VanitySpec {
+    let raw = &args.pattern;
+    assert!(
+        !raw.is_empty(),
+        "supply at least one --pattern"
+    );
+    assert!(
+        raw.len() <= fast::MAX_PATTERNS,
+        "at most {} --pattern flags",
+        fast::MAX_PATTERNS
+    );
+
+    let mut patterns = Vec::with_capacity(raw.len());
+    for r in &raw {
+        let pat = parse_pattern(r);
+        validate_bs58("pattern prefix", &pat.prefix);
+        validate_bs58("pattern suffix", &pat.suffix);
+        patterns.push(VanityPattern {
+            prefix: maybe_bs58_aware_lowercase(
+                &pat.prefix,
+                args.case_insensitive,
+            ),
+            suffix: maybe_bs58_aware_lowercase(
+                &pat.suffix,
+                args.case_insensitive,
+            ),
+        });
+    }
+    VanitySpec {
+        patterns: prune_dominated(&patterns),
+        case_insensitive: args.case_insensitive,
     }
 }
 
@@ -635,41 +778,35 @@ pub fn deploy_with_max_program_len_with_seed(
 
 fn grind(mut args: GrindArgs) {
     maybe_update_num_cpus(&mut args.num_cpus);
-    let prefix = get_validated_bs58(
-        "prefix",
-        &args.prefix,
-        args.case_insensitive,
-    );
-    let suffix = get_validated_bs58(
-        "suffix",
-        &args.suffix,
-        args.case_insensitive,
-    );
-
-    let expected =
-        expected_attempts(prefix, suffix, args.case_insensitive);
-    let prob = bs58_probability(prefix, suffix, args.case_insensitive);
+    let spec = resolve_spec(&args.spec);
+    let expected = spec.expected_attempts();
+    let prob = spec.probability();
     #[cfg(feature = "gpu")]
     eprintln!("using {} cpus, {} gpus", args.num_cpus, args.num_gpus);
     #[cfg(not(feature = "gpu"))]
     eprintln!("using {} cpus", args.num_cpus);
-    let target_label = format_target_label(prefix, suffix);
     eprintln!(
         "target: {} | probability: {:.6e} | expected: {} attempts",
-        target_label,
+        spec.label(),
         prob,
         (expected as u64).to_formatted_string(&Locale::en)
     );
 
     let target_count = args.count;
     let shutdown = Arc::new(AtomicBool::new(false));
+    let spec = Arc::new(spec);
 
     #[cfg(feature = "gpu")]
     let gpu_thread = if args.num_gpus > 0 {
         let num_gpus = args.num_gpus;
         let base = args.base;
         let owner = args.owner;
-        let ci = args.case_insensitive;
+        let pairs = spec.pairs();
+        let blob = Arc::new(
+            fast::MatchTargets::new(&pairs, spec.case_insensitive)
+                .gpu_blob(),
+        );
+        let spec = Arc::clone(&spec);
         Some(
             thread::Builder::new()
                 .name("gpu_mgr".into())
@@ -687,11 +824,9 @@ fn grind(mut args: GrindArgs) {
                                 id as i32,
                                 base.as_ref().as_ptr(),
                                 owner.as_ref().as_ptr(),
-                                prefix.as_ptr(),
-                                prefix.len() as u64,
-                                suffix.as_ptr(),
-                                suffix.len() as u64,
-                                ci,
+                                blob.as_ptr(),
+                                blob.len() as u64,
+                                spec.case_insensitive,
                             )
                         },
                         || done(target_count),
@@ -703,12 +838,8 @@ fn grind(mut args: GrindArgs) {
                                 .finalize()
                                 .into();
                             let out_str = fd_bs58::encode_32(reconstructed);
-                            let out_str_check =
-                                maybe_bs58_aware_lowercase(&out_str, ci);
 
-                            if out_str_check.starts_with(prefix)
-                                && out_str_check.ends_with(suffix)
-                            {
+                            if spec.matches(&out_str) {
                                 eprintln!(
                                     "\r\x1b[Kgpu {} match: {} in {:.3}s",
                                     i, out_str, time_sec
@@ -769,7 +900,7 @@ fn grind(mut args: GrindArgs) {
                 local_batch -= 4096;
             }
 
-            if matches_target(&pubkey, prefix, suffix, args.case_insensitive) {
+            if spec.matches(&pubkey) {
                 if local_batch > 0 {
                     TOTAL_ATTEMPTS.fetch_add(local_batch, Ordering::Relaxed);
                     local_batch = 0;
@@ -819,20 +950,9 @@ fn grind(mut args: GrindArgs) {
 fn grind_keypair(mut args: GrindKeypairArgs) {
     check_write_permissions();
     maybe_update_num_cpus(&mut args.num_cpus);
-    let prefix = get_validated_bs58(
-        "prefix",
-        &args.prefix,
-        args.case_insensitive,
-    );
-    let suffix = get_validated_bs58(
-        "suffix",
-        &args.suffix,
-        args.case_insensitive,
-    );
-
-    let expected =
-        expected_attempts(prefix, suffix, args.case_insensitive);
-    let prob = bs58_probability(prefix, suffix, args.case_insensitive);
+    let spec = resolve_spec(&args.spec);
+    let expected = spec.expected_attempts();
+    let prob = spec.probability();
     #[cfg(feature = "gpu")]
     eprintln!(
         "using {} cpus, {} gpus (cpu backend: {})",
@@ -846,10 +966,9 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
         args.num_cpus,
         fast::backend_name()
     );
-    let target_label = format_target_label(prefix, suffix);
     eprintln!(
         "target: {} | probability: {:.6e} | expected: {} attempts",
-        target_label,
+        spec.label(),
         prob,
         (expected as u64).to_formatted_string(&Locale::en)
     );
@@ -858,6 +977,12 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
     fast::reset_grind();
     let shutdown = Arc::new(AtomicBool::new(false));
     let grind_start = Instant::now();
+    let match_targets = {
+        let pairs = spec.pairs();
+        fast::MatchTargets::new(&pairs, spec.case_insensitive)
+    };
+    #[cfg(feature = "gpu")]
+    let spec = Arc::new(spec);
 
     // Reporter reads the shared fast-path counters (CPU + GPU both update them).
     let reporter = {
@@ -880,7 +1005,8 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
     #[cfg(feature = "gpu")]
     let gpu_thread = if args.num_gpus > 0 {
         let num_gpus = args.num_gpus;
-        let ci = args.case_insensitive;
+        let blob = Arc::new(match_targets.gpu_blob());
+        let spec = Arc::clone(&spec);
         Some(
             thread::Builder::new()
                 .name("gpu_mgr".into())
@@ -896,11 +1022,9 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                         |id| unsafe {
                             gpu_keypair_init(
                                 id as i32,
-                                prefix.as_ptr(),
-                                prefix.len() as u64,
-                                suffix.as_ptr(),
-                                suffix.len() as u64,
-                                ci,
+                                blob.as_ptr(),
+                                blob.len() as u64,
+                                spec.case_insensitive,
                             )
                         },
                         || {
@@ -915,12 +1039,8 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                             let pubkey_bytes =
                                 signing_key.verifying_key().to_bytes();
                             let pubkey_str = fd_bs58::encode_32(pubkey_bytes);
-                            let pubkey_check =
-                                maybe_bs58_aware_lowercase(&pubkey_str, ci);
 
-                            if pubkey_check.starts_with(prefix)
-                                && pubkey_check.ends_with(suffix)
-                            {
+                            if spec.matches(&pubkey_str) {
                                 let prev = fast::note_found();
                                 if prev < target_count {
                                     eprintln!(
@@ -944,13 +1064,7 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
         None
     };
 
-    fast::run_cpu_workers(
-        prefix,
-        suffix,
-        args.case_insensitive,
-        args.num_cpus,
-        target_count,
-    );
+    fast::run_cpu_workers(&match_targets, args.num_cpus, target_count);
 
     // CPU workers finished (found enough or aborted); stop GPU too.
     fast::request_abort();
@@ -1277,24 +1391,15 @@ fn check_write_permissions() {
     }
 }
 
-fn get_validated_bs58(
-    label: &str,
-    value: &Option<String>,
-    case_insensitive: bool,
-) -> &'static str {
+fn validate_bs58(label: &str, value: &str) {
     const BS58_CHARS: &str =
         "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    if let Some(ref s) = value {
-        for c in s.chars() {
-            assert!(
-                BS58_CHARS.contains(c),
-                "your {label} contains invalid bs58: {c}"
-            );
-        }
-        let validated = maybe_bs58_aware_lowercase(s, case_insensitive);
-        return validated.leak();
+    for c in value.chars() {
+        assert!(
+            BS58_CHARS.contains(c),
+            "your {label} contains invalid bs58: {c}"
+        );
     }
-    ""
 }
 
 fn maybe_bs58_aware_lowercase(
@@ -1359,10 +1464,8 @@ extern "C" {
         id: i32,
         base: *const u8,
         owner: *const u8,
-        target: *const u8,
-        target_len: u64,
-        suffix: *const u8,
-        suffix_len: u64,
+        patterns: *const u8,
+        patterns_len: u64,
         case_insensitive: bool,
     ) -> *mut std::ffi::c_void;
     pub fn gpu_grind_launch(
@@ -1375,10 +1478,8 @@ extern "C" {
 
     pub fn gpu_keypair_init(
         id: i32,
-        prefix: *const u8,
-        prefix_len: u64,
-        suffix: *const u8,
-        suffix_len: u64,
+        patterns: *const u8,
+        patterns_len: u64,
         case_insensitive: bool,
     ) -> *mut std::ffi::c_void;
     pub fn gpu_keypair_launch(
@@ -1441,5 +1542,68 @@ mod tests {
     #[test]
     fn bs58_ci_factor_skips_non_letters() {
         assert_eq!(bs58_ci_factor("1A", ""), 2.0);
+    }
+
+    #[test]
+    fn parse_pattern_splits_on_ellipsis() {
+        assert_eq!(
+            parse_pattern("Cavey...CooL"),
+            VanityPattern {
+                prefix: "Cavey".into(),
+                suffix: "CooL".into(),
+            }
+        );
+        assert_eq!(
+            parse_pattern("Harmonic..."),
+            VanityPattern {
+                prefix: "Harmonic".into(),
+                suffix: String::new(),
+            }
+        );
+        assert_eq!(
+            parse_pattern("...pump"),
+            VanityPattern {
+                prefix: String::new(),
+                suffix: "pump".into(),
+            }
+        );
+        assert_eq!(
+            parse_pattern("Harmonic"),
+            VanityPattern {
+                prefix: "Harmonic".into(),
+                suffix: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn prune_drops_dominated_patterns() {
+        let kept = prune_dominated(&[
+            VanityPattern {
+                prefix: "Harmonic".into(),
+                suffix: "xyz".into(),
+            },
+            VanityPattern {
+                prefix: "Harmonic".into(),
+                suffix: String::new(),
+            },
+            VanityPattern {
+                prefix: "Cavey".into(),
+                suffix: "CooL".into(),
+            },
+        ]);
+        assert_eq!(
+            kept,
+            vec![
+                VanityPattern {
+                    prefix: "Harmonic".into(),
+                    suffix: String::new(),
+                },
+                VanityPattern {
+                    prefix: "Cavey".into(),
+                    suffix: "CooL".into(),
+                },
+            ]
+        );
     }
 }
