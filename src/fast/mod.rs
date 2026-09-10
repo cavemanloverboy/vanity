@@ -8,12 +8,12 @@ use check_match::MatchTarget;
 use field::{batch_invert, Fe};
 use group::{edwards_d2, Niels, Point};
 
-use crate::{TOTAL_ATTEMPTS, ABORTED, FOUND, check_write_permissions, save_keypair};
-use sha2::{Digest, Sha512};
-use std::sync::{
-    atomic::Ordering,
-    OnceLock,
+use crate::{
+    check_write_permissions, save_keypair, ABORTED, FOUND,
+    TOTAL_ATTEMPTS,
 };
+use sha2::{Digest, Sha512};
+use std::sync::{atomic::Ordering, OnceLock};
 
 pub const BATCH: usize = 512;
 
