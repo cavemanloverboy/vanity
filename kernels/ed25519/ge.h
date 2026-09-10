@@ -14,7 +14,7 @@ typedef struct { fe yplusx; fe yminusx; fe z; fe t2d; } ge_niels;
 #define COMB_WINDOWS  52
 #define COMB_POS      16
 #define COMB_TABLE_LEN (COMB_WINDOWS * COMB_POS)
-#define KP_BATCH_MAX  8
+#define KP_BATCH_MAX  32
 
 __device__ void ge_p3_tobytes(unsigned char *s, const ge_p3 *h);
 __device__ void ge_p3_tobytes_inv(unsigned char *s, const fe X, const fe Y, const fe zinv);
