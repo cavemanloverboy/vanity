@@ -460,7 +460,7 @@ impl Point8 {
 #[cfg(target_arch = "x86_64")]
 const SIMD_W: usize = 5; // comb radix = 2^SIMD_W
 #[cfg(target_arch = "x86_64")]
-const SIMD_WINDOWS: usize = (256 + SIMD_W - 1) / SIMD_W;
+const SIMD_WINDOWS: usize = 256usize.div_ceil(SIMD_W);
 #[cfg(target_arch = "x86_64")]
 const SIMD_POS: usize = 1 << (SIMD_W - 1); // positive multiples per window
 #[cfg(target_arch = "x86_64")]
@@ -535,7 +535,7 @@ pub fn build_simd_table() -> [u64; SIMD_TABLE_LEN] {
 #[cfg(target_arch = "x86_64")]
 #[inline]
 fn to_radix(bytes: &[u8; 32]) -> [i8; SIMD_WINDOWS] {
-    let mask = ((1u16 << SIMD_W) - 1) as u16;
+    let mask = (1u16 << SIMD_W) - 1;
     let mut d = [0i8; SIMD_WINDOWS];
     for (i, di) in d.iter_mut().enumerate() {
         let bit = SIMD_W * i;

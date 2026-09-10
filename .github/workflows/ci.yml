@@ -1,0 +1,96 @@
+# `gpu` needs the CUDA toolkit (nvcc) at build time; `opencl` needs an
+# OpenCL ICD + headers. GitHub-hosted runners have no NVIDIA GPU, so the
+# `gpu` job only compile-checks (clippy) — it does not launch CUDA kernels.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --locked
+      - name: Test (deploy)
+        run: cargo test --locked --features deploy
+
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Clippy (deploy)
+        run: cargo clippy --locked --all-targets --features deploy -- -D warnings
+
+  opencl:
+    name: opencl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install OpenCL
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ocl-icd-opencl-dev opencl-headers
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --features opencl -- -D warnings
+      - name: Clippy (opencl + deploy)
+        run: cargo clippy --locked --all-targets --features opencl,deploy -- -D warnings
+
+  gpu:
+    name: gpu
+    # 22.04 has the most reliable CUDA network packages for this action.
+    runs-on: ubuntu-22.04
+    env:
+      # One arch is enough to compile-check the kernels; the default matrix
+      # (75/80/86/89 + PTX) is several minutes of nvcc on CI.
+      VANITY_CUDA_ARCH: "75"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "12.8.1"
+          method: network
+          sub-packages: '["nvcc", "cudart-dev", "driver-dev"]'
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --features gpu -- -D warnings
+      - name: Clippy (gpu + deploy)
+        run: cargo clippy --locked --all-targets --features gpu,deploy -- -D warnings

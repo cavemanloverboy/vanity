@@ -38,14 +38,14 @@ fn build_cuda_libs() {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
             {
-                build.flag(&format!(
+                build.flag(format!(
                     "-gencode=arch=compute_{arch},code=sm_{arch}"
                 ));
             }
         }
         _ => {
             for arch in ["75", "80", "86", "89"] {
-                build.flag(&format!(
+                build.flag(format!(
                     "-gencode=arch=compute_{arch},code=sm_{arch}"
                 ));
             }
@@ -56,8 +56,20 @@ fn build_cuda_libs() {
 
     build.compile("libvanity.a");
 
-    // Add link directory
-    println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64");
+    // Prefer CUDA_PATH/CUDA_HOME (set by toolkit installers and CI) so we
+    // don't assume a /usr/local/cuda symlink. Stubs let -lcuda resolve at
+    // link time on machines with a toolkit but no NVIDIA driver (compile-only
+    // CI). The real libcuda.so.1 still comes from the driver at runtime.
+    println!("cargo::rerun-if-env-changed=CUDA_PATH");
+    println!("cargo::rerun-if-env-changed=CUDA_HOME");
+    let cuda_root = std::env::var("CUDA_PATH")
+        .or_else(|_| std::env::var("CUDA_HOME"))
+        .unwrap_or_else(|_| "/usr/local/cuda".into());
+    println!("cargo:rustc-link-search=native={cuda_root}/lib64");
+    let stubs = format!("{cuda_root}/lib64/stubs");
+    if std::path::Path::new(&stubs).is_dir() {
+        println!("cargo:rustc-link-search=native={stubs}");
+    }
     println!("cargo:rustc-link-lib=cudart");
     println!("cargo:rustc-link-lib=cuda");
 

@@ -5,7 +5,6 @@ use ed25519_dalek::SigningKey;
 use num_bigint::BigUint;
 use num_format::{Locale, ToFormattedString};
 use num_traits::{One, ToPrimitive, Zero};
-use rand;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use sha2::{Digest, Sha256};
 use solana_pubkey::Pubkey;
@@ -283,7 +282,7 @@ fn bs58_ci_position_factor(pattern_c: char) -> f64 {
             if pattern_c == 'L' {
                 a == 'L'
             } else {
-                a.to_ascii_lowercase() == pattern_c.to_ascii_lowercase()
+                a.eq_ignore_ascii_case(&pattern_c)
             }
         })
         .count();
@@ -654,7 +653,7 @@ fn grind(mut args: GrindArgs) {
                             {
                                 eprintln!(
                                     "\r\x1b[Kgpu {} match: {} in {:.3}s",
-                                    i, &out_str, time_sec
+                                    i, out_str, time_sec
                                 );
                                 eprintln!(
                                     "out seed = {out:?} -> {}",
@@ -926,7 +925,7 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                                 if prev < target_count {
                                     eprintln!(
                                         "\r\x1b[Kgpu {} match: {} in {:.3}s",
-                                        i, &pubkey_str, time_sec
+                                        i, pubkey_str, time_sec
                                     );
                                     eprintln!("pubkey: {pubkey_str}");
                                     save_keypair(
@@ -1102,7 +1101,7 @@ fn grind_doppler(mut args: DopplerArgs) {
                                 let pubkey_str = fd_bs58::encode_32(pubkey_bytes);
                                 eprintln!(
                                     "\r\x1b[Kgpu {} match: {} in {:.3}s",
-                                    i, &pubkey_str, time_sec
+                                    i, pubkey_str, time_sec
                                 );
                                 print_doppler_result(&found_seed, &pubkey_str);
                                 save_keypair(&found_seed, &pubkey_bytes, &pubkey_str);

@@ -99,7 +99,7 @@ impl MatchTarget {
             self.prefix_len,
             &self.suffix_idx,
             self.suffix_len,
-            &self.match_lut,
+            self.match_lut,
         )
     }
 }

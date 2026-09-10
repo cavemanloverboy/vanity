@@ -221,7 +221,7 @@ unsafe fn grind_thread_simd(target: &MatchTarget, count: u32) {
                 if prev < count {
                     let s = fd_bs58::encode_32(pubkeys[j]);
                     eprintln!("\r\x1b[Kmatch: {s}");
-                    eprintln!(pubkey: "{s}");
+                    eprintln!("pubkey: {s}");
                     save_keypair(&used[j], &pubkeys[j], &s);
                 }
             }

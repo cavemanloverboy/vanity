@@ -20,6 +20,15 @@ opencl = ["gpu"]
 deploy = ["solana-rpc-client", "solana-sdk"]
 default = []
 
+[lints.clippy]
+# Indexed loops and Copy `to_bytes(&self)` are the house style in the
+# field/SIMD code; clippy's rewrites there are noise or wrong (e.g.
+# `manual_memcpy` dropping a sign-bit OR).
+needless_range_loop = "allow"
+wrong_self_convention = "allow"
+manual_memcpy = "allow"
+too_many_arguments = "allow"
+
 [profile.release]
 lto = "fat"
 codegen-units = 1

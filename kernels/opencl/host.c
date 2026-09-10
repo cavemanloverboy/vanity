@@ -120,7 +120,10 @@ static cl_program build_program(cl_context ctx, cl_device_id dev,
     cl_int err;
     cl_program prog = clCreateProgramWithSource(ctx, n, srcs, lens, &err);
     CK(err, "clCreateProgramWithSource");
-    err = clBuildProgram(prog, 1, &dev, "", NULL, NULL);
+    /* CL1.2: `fe` array parameters stay __private, matching struct fields
+       of private ge_* values. Newer clang defaults to CL2+/generic AS and
+       then rejects `fe_add(r->X, …)` (generic vs private). */
+    err = clBuildProgram(prog, 1, &dev, "-cl-std=CL1.2", NULL, NULL);
     if (err != CL_SUCCESS) {
         size_t log_sz = 0;
         clGetProgramBuildInfo(prog, dev, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_sz);
