@@ -235,23 +235,7 @@ extern "C" void gpu_keypair_destroy(void *opaque)
 static __device__ __forceinline__ void kp_sha512_32(const unsigned char seed[32],
                                                    unsigned char out[64])
 {
-    sha512_context md;
-    md.curlen = 0;
-    md.length = 0;
-    md.state[0] = UINT64_C(0x6a09e667f3bcc908);
-    md.state[1] = UINT64_C(0xbb67ae8584caa73b);
-    md.state[2] = UINT64_C(0x3c6ef372fe94f82b);
-    md.state[3] = UINT64_C(0xa54ff53a5f1d36f1);
-    md.state[4] = UINT64_C(0x510e527fade682d1);
-    md.state[5] = UINT64_C(0x9b05688c2b3e6c1f);
-    md.state[6] = UINT64_C(0x1f83d9abfb41bd6b);
-    md.state[7] = UINT64_C(0x5be0cd19137e2179);
-    #pragma unroll
-    for (int i = 0; i < 32; i++) {
-        md.buf[i] = seed[i];
-    }
-    md.curlen = 32;
-    sha512_final(&md, out);
+    sha512_32(seed, out);
 }
 
 static __global__ void __launch_bounds__(KP_MAX_THREADS)

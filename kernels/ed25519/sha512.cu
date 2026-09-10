@@ -166,6 +166,66 @@ __device__ int sha512(const unsigned char *message, size_t message_len, unsigned
     return sha512_final(&md, out);
 }
 
+/* One-block SHA-512 of a 32-byte message (ed25519 seed). Padding is
+   seed || 0x80 || zeros || bitlen=256 — no generic context or pad loops. */
+static __device__ void sha512_32(const unsigned char seed[32], unsigned char out[64])
+{
+    uint64_t S512[8], W[80], t0, t1;
+
+    S512[0] = UINT64_C(0x6a09e667f3bcc908);
+    S512[1] = UINT64_C(0xbb67ae8584caa73b);
+    S512[2] = UINT64_C(0x3c6ef372fe94f82b);
+    S512[3] = UINT64_C(0xa54ff53a5f1d36f1);
+    S512[4] = UINT64_C(0x510e527fade682d1);
+    S512[5] = UINT64_C(0x9b05688c2b3e6c1f);
+    S512[6] = UINT64_C(0x1f83d9abfb41bd6b);
+    S512[7] = UINT64_C(0x5be0cd19137e2179);
+
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        LOAD64H(W[i], seed + 8 * i);
+    }
+    W[4] = UINT64_C(0x8000000000000000);
+#pragma unroll
+    for (int i = 5; i < 15; i++) {
+        W[i] = 0;
+    }
+    W[15] = UINT64_C(256);
+
+#pragma unroll
+    for (int i = 16; i < 80; i++) {
+        W[i] = Gamma1(W[i - 2]) + W[i - 7] + Gamma0(W[i - 15]) + W[i - 16];
+    }
+
+#define RND512_32(a,b,c,d,e,f,g,h,i) \
+    t0 = h + Sigma1(e) + Ch(e, f, g) + K512[i] + W[i]; \
+    t1 = Sigma0(a) + Maj(a, b, c); \
+    d += t0; \
+    h  = t0 + t1;
+
+#pragma unroll
+    for (int i = 0; i < 80; i += 8) {
+       RND512_32(S512[0],S512[1],S512[2],S512[3],S512[4],S512[5],S512[6],S512[7],i+0);
+       RND512_32(S512[7],S512[0],S512[1],S512[2],S512[3],S512[4],S512[5],S512[6],i+1);
+       RND512_32(S512[6],S512[7],S512[0],S512[1],S512[2],S512[3],S512[4],S512[5],i+2);
+       RND512_32(S512[5],S512[6],S512[7],S512[0],S512[1],S512[2],S512[3],S512[4],i+3);
+       RND512_32(S512[4],S512[5],S512[6],S512[7],S512[0],S512[1],S512[2],S512[3],i+4);
+       RND512_32(S512[3],S512[4],S512[5],S512[6],S512[7],S512[0],S512[1],S512[2],i+5);
+       RND512_32(S512[2],S512[3],S512[4],S512[5],S512[6],S512[7],S512[0],S512[1],i+6);
+       RND512_32(S512[1],S512[2],S512[3],S512[4],S512[5],S512[6],S512[7],S512[0],i+7);
+    }
+#undef RND512_32
+
+    STORE64H(S512[0] + UINT64_C(0x6a09e667f3bcc908), out +  0);
+    STORE64H(S512[1] + UINT64_C(0xbb67ae8584caa73b), out +  8);
+    STORE64H(S512[2] + UINT64_C(0x3c6ef372fe94f82b), out + 16);
+    STORE64H(S512[3] + UINT64_C(0xa54ff53a5f1d36f1), out + 24);
+    STORE64H(S512[4] + UINT64_C(0x510e527fade682d1), out + 32);
+    STORE64H(S512[5] + UINT64_C(0x9b05688c2b3e6c1f), out + 40);
+    STORE64H(S512[6] + UINT64_C(0x1f83d9abfb41bd6b), out + 48);
+    STORE64H(S512[7] + UINT64_C(0x5be0cd19137e2179), out + 56);
+}
+
 #undef Ch
 #undef Maj
 #undef S
