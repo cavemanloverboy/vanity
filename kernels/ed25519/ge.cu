@@ -262,6 +262,7 @@ __device__ void ge_scalarmult_base_comb(ge_p3 *h, const unsigned char *a, const 
     to_radix32(e, a);
     ge_p3_0(h);
     for (int i = 0; i < COMB_WINDOWS; i++) {
+        if (e[i] == 0) continue; /* identity add; vanity is not constant-time */
         ge_niels t;
         ge_p1p1 r;
         ge_niels_select(&t, &table[i * COMB_POS], e[i]);
