@@ -207,24 +207,41 @@ static __device__ void ge_add_niels(ge_p1p1 *r, const ge_p3 *p, const ge_niels *
     fe_sub(r->T, zz2, tt2d);
 }
 
-static __device__ void ge_niels_select(ge_niels *t, const ge_niels *window, signed char b)
+static __device__ void ge_add_niels_affine(ge_p1p1 *r, const ge_p3 *p, const ge_affine *n)
 {
-    unsigned char bnegative = negative(b);
-    unsigned char babs = b - (((-bnegative) & b) << 1);
+    fe y_plus_x, y_minus_x, pp, mm, tt2d, zz2;
+    fe_add(y_plus_x, p->Y, p->X);
+    fe_sub(y_minus_x, p->Y, p->X);
+    fe_mul(pp, y_plus_x, n->yplusx);
+    fe_mul(mm, y_minus_x, n->yminusx);
+    fe_mul(tt2d, p->T, n->t2d);
+    fe_add(zz2, p->Z, p->Z);
+    fe_sub(r->X, pp, mm);
+    fe_add(r->Y, pp, mm);
+    fe_add(r->Z, zz2, tt2d);
+    fe_sub(r->T, zz2, tt2d);
+}
+
+static __device__ void ge_niels_select(ge_affine *t, const ge_comb_table *table, int window, int b)
+{
+    unsigned int bnegative = b < 0;
+    unsigned int babs = bnegative ? -b : b;
 
     if (babs == 0) {
         fe_1(t->yplusx);
         fe_1(t->yminusx);
-        fe_1(t->z);
         fe_0(t->t2d);
         return;
     }
 
-    const ge_niels *u = &window[babs - 1];
-    fe_copy(t->yplusx, u->yplusx);
-    fe_copy(t->yminusx, u->yminusx);
-    fe_copy(t->z, u->z);
-    fe_copy(t->t2d, u->t2d);
+    const int32_t *words = table->limbs + window * COMB_POS * 30;
+    int index = babs - 1;
+    #pragma unroll
+    for (int k = 0; k < 10; k++) {
+        t->yplusx[k] = words[k * COMB_POS + index];
+        t->yminusx[k] = words[(10 + k) * COMB_POS + index];
+        t->t2d[k] = words[(20 + k) * COMB_POS + index];
+    }
 
     if (bnegative) {
         fe tmp;
@@ -235,43 +252,44 @@ static __device__ void ge_niels_select(ge_niels *t, const ge_niels *window, sign
     }
 }
 
-static __device__ void to_radix32(signed char e[COMB_WINDOWS], const unsigned char *a)
+static __device__ void to_comb_digits(int16_t e[COMB_WINDOWS], const unsigned char *a)
 {
-    const unsigned short mask = (unsigned short)((1u << COMB_W) - 1u);
+    const unsigned int mask = (1u << COMB_W) - 1u;
     for (int i = 0; i < COMB_WINDOWS; i++) {
         int bit = COMB_W * i;
         int byte = bit / 8;
         int off = bit % 8;
-        unsigned short lo = a[byte];
-        unsigned short hi = (byte + 1 < 32) ? a[byte + 1] : 0;
-        e[i] = (signed char)(((lo | (hi << 8)) >> off) & mask);
+        unsigned int word = 0;
+        for (int j = 0; j < 3; j++) {
+            if (byte + j < 32) word |= ((unsigned int)a[byte + j]) << (8 * j);
+        }
+        e[i] = (int16_t)((word >> off) & mask);
     }
-    const signed char pos = (signed char)COMB_POS;
-    signed char carry = 0;
+    int carry = 0;
     for (int i = 0; i < COMB_WINDOWS - 1; i++) {
-        e[i] += carry;
-        carry = (signed char)((e[i] + pos) >> COMB_W);
-        e[i] -= (signed char)(carry << COMB_W);
+        int digit = (int)e[i] + carry;
+        carry = (digit + COMB_POS) >> COMB_W;
+        e[i] = (int16_t)(digit - (carry << COMB_W));
     }
     e[COMB_WINDOWS - 1] += carry;
 }
 
-__device__ void ge_scalarmult_base_comb(ge_p3 *h, const unsigned char *a, const ge_niels *table)
+__device__ void ge_scalarmult_base_comb(ge_p3 *h, const unsigned char *a, const ge_comb_table *table)
 {
-    signed char e[COMB_WINDOWS];
-    to_radix32(e, a);
+    int16_t e[COMB_WINDOWS];
+    to_comb_digits(e, a);
     ge_p3_0(h);
     for (int i = 0; i < COMB_WINDOWS; i++) {
         if (e[i] == 0) continue; /* identity add; vanity is not constant-time */
-        ge_niels t;
+        ge_affine t;
         ge_p1p1 r;
-        ge_niels_select(&t, &table[i * COMB_POS], e[i]);
-        ge_add_niels(&r, h, &t);
+        ge_niels_select(&t, table, i, e[i]);
+        ge_add_niels_affine(&r, h, &t);
         ge_p1p1_to_p3(h, &r);
     }
 }
 
-/* One-shot: table[window][1..16] = (k+1) * 32^window * B. */
+/* One-shot: table[window][k] = (k+1) * 2^(COMB_W * window) * B. */
 __global__ void build_comb_table(ge_niels *table)
 {
     if (blockIdx.x != 0 || threadIdx.x != 0) return;
@@ -319,6 +337,28 @@ __global__ void build_comb_table(ge_niels *table)
             ge_p3_dbl(&r, &cur);
             ge_p1p1_to_p3(&cur, &r);
         }
+    }
+}
+
+/* Normalize fixed-base entries once, saving a field multiply per addition. */
+__global__ void normalize_comb_table(const ge_niels *table, ge_comb_table *out)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= COMB_TABLE_LEN) return;
+    const ge_niels *p = &table[i];
+    fe inv;
+    fe_invert(inv, p->z);
+    ge_affine point;
+    fe_mul(point.yplusx, p->yplusx, inv);
+    fe_mul(point.yminusx, p->yminusx, inv);
+    fe_mul(point.t2d, p->t2d, inv);
+    int32_t *words = out->limbs + (i / COMB_POS) * COMB_POS * 30;
+    int index = i % COMB_POS;
+    #pragma unroll
+    for (int k = 0; k < 10; k++) {
+        words[k * COMB_POS + index] = point.yplusx[k];
+        words[(10 + k) * COMB_POS + index] = point.yminusx[k];
+        words[(20 + k) * COMB_POS + index] = point.t2d[k];
     }
 }
 

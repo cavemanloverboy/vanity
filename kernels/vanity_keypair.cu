@@ -20,7 +20,7 @@ __device__ static unsigned long long kp_count = 0;
 
 template<bool MULTI>
 static __global__ void vanity_keypair_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles,
-                      const ge_niels *comb);
+                      const ge_comb_table *comb);
 
 /* Device-wide nanosecond clock. clock64() is per-SM and cannot be compared
    across the grid; %globaltimer is what makes a 2s slice mean 2s wall. */
@@ -49,24 +49,48 @@ static int one_wave_blocks(Kernel kernel, int nthreads, int sms, const char *who
     return bps * sms;
 }
 
-static int build_comb_or_die(ge_niels **out, cudaStream_t stream, const char *who)
+static int build_comb_or_die(ge_comb_table **out, cudaStream_t stream, const char *who)
 {
-    cudaError_t err = cudaMalloc((void **)out, (size_t)COMB_TABLE_LEN * sizeof(ge_niels));
+    cudaError_t err = cudaMalloc((void **)out, sizeof(ge_comb_table));
     if (err != cudaSuccess) {
         fprintf(stderr, "%s: cudaMalloc comb: %s\n", who, cudaGetErrorString(err));
         return -1;
     }
-    build_comb_table<<<1, 1, 0, stream>>>(*out);
+    ge_niels *temporary;
+    err = cudaMalloc((void **)&temporary, (size_t)COMB_TABLE_LEN * sizeof(ge_niels));
+    if (err != cudaSuccess) {
+        fprintf(stderr, "%s: cudaMalloc temporary comb: %s\n", who, cudaGetErrorString(err));
+        cudaFree(*out);
+        *out = NULL;
+        return -1;
+    }
+    build_comb_table<<<1, 1, 0, stream>>>(temporary);
     err = cudaGetLastError();
     if (err != cudaSuccess) {
         fprintf(stderr, "%s: build_comb_table launch: %s\n", who, cudaGetErrorString(err));
+        cudaFree(temporary);
+        cudaFree(*out);
+        *out = NULL;
+        return -1;
+    }
+    normalize_comb_table<<<(COMB_TABLE_LEN + 127) / 128, 128, 0, stream>>>(temporary, *out);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "%s: normalize_comb_table launch: %s\n", who, cudaGetErrorString(err));
+        cudaFree(temporary);
+        cudaFree(*out);
+        *out = NULL;
         return -1;
     }
     err = cudaStreamSynchronize(stream);
     if (err != cudaSuccess) {
         fprintf(stderr, "%s: build_comb_table sync: %s\n", who, cudaGetErrorString(err));
+        cudaFree(temporary);
+        cudaFree(*out);
+        *out = NULL;
         return -1;
     }
+    cudaFree(temporary);
     return 0;
 }
 
@@ -76,7 +100,7 @@ typedef struct {
     int device_id;
     cudaStream_t stream;
     uint8_t *d_buffer;
-    ge_niels *d_comb;
+    ge_comb_table *d_comb;
     int num_blocks;
     int num_threads;
     unsigned long long target_cycles;
@@ -247,7 +271,7 @@ static __device__ __forceinline__ void kp_sha512_32(const unsigned char seed[32]
 template<bool MULTI>
 static __global__ void __launch_bounds__(KP_MAX_THREADS)
 vanity_keypair_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles,
-                      const ge_niels *comb)
+                      const ge_comb_table *comb)
 {
     (void)stride;
     uint8_t *host_seed = buffer;
@@ -374,7 +398,7 @@ __device__ static uint32_t dop_required = 1;
 
 static __global__ void __launch_bounds__(KP_MAX_THREADS)
 vanity_doppler_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles,
-                      const ge_niels *comb);
+                      const ge_comb_table *comb);
 
 static __device__ __forceinline__ uint32_t doppler_count(const unsigned char *pk)
 {
@@ -394,7 +418,7 @@ typedef struct {
     int device_id;
     cudaStream_t stream;
     uint8_t *d_buffer;
-    ge_niels *d_comb;
+    ge_comb_table *d_comb;
     int num_blocks;
     int num_threads;
     unsigned long long target_cycles;
@@ -503,7 +527,7 @@ extern "C" void gpu_doppler_destroy(void *opaque)
 
 static __global__ void __launch_bounds__(KP_MAX_THREADS)
 vanity_doppler_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles,
-                      const ge_niels *comb)
+                      const ge_comb_table *comb)
 {
     (void)stride;
     uint8_t *host_seed = buffer;

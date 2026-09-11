@@ -1,6 +1,8 @@
 use fd_bs58::constants::{
     BINARY_SZ_32, ENC_TABLE_32, INTERMEDIATE_SZ_32, R1_DIV, RAW58_SZ_32,
 };
+use num_bigint::BigUint;
+use num_traits::One;
 
 pub const MAX_PATTERN_LEN: usize = 44;
 pub const MAX_PATTERNS: usize = 64;
@@ -51,6 +53,7 @@ pub fn match_lut(case_insensitive: bool) -> &'static [u8; 58] {
 }
 
 struct PatternIdx {
+    prefix_ranges: Option<Vec<([u8; 32], [u8; 32])>>,
     prefix_idx: [u8; MAX_PATTERN_LEN],
     prefix_len: u8,
     suffix_idx: [u8; MAX_PATTERN_LEN],
@@ -101,6 +104,7 @@ impl MatchTargets {
                 suffix_idx[i] = char_to_canonical(b, alphabet, lut);
             }
             out.push(PatternIdx {
+                prefix_ranges: prefix_ranges(prefix, case_insensitive),
                 prefix_idx,
                 prefix_len: prefix.len() as u8,
                 suffix_idx,
@@ -127,7 +131,35 @@ impl MatchTargets {
         bytes: &[u8; 32],
         active: u64,
     ) -> u64 {
-        check_match_32(bytes, &self.patterns, self.match_lut, active)
+        let mut mask = 0u64;
+        let mut encode_active = 0u64;
+        for (pi, p) in self.patterns.iter().enumerate() {
+            if active & (1u64 << pi) == 0 {
+                continue;
+            }
+            if let Some(ranges) = &p.prefix_ranges {
+                if !ranges
+                    .iter()
+                    .any(|(lo, hi)| bytes >= lo && bytes <= hi)
+                {
+                    continue;
+                }
+                if p.suffix_len == 0 {
+                    mask |= 1u64 << pi;
+                    continue;
+                }
+            }
+            encode_active |= 1u64 << pi;
+        }
+        if encode_active != 0 {
+            mask |= check_match_32(
+                bytes,
+                &self.patterns,
+                self.match_lut,
+                encode_active,
+            );
+        }
+        mask
     }
 
     /// Canonical-index blob consumed by `gpu_grind_init` / `gpu_keypair_init`.
@@ -181,6 +213,42 @@ fn char_to_canonical(
         }
     }
     255
+}
+
+// Exact prefixes can be checked as byte ranges without base58
+// conversion. Keep the encode matcher for leading '1' and
+// case-insensitive searches.
+fn prefix_ranges(
+    prefix: &str,
+    ci: bool,
+) -> Option<Vec<([u8; 32], [u8; 32])>> {
+    if ci || prefix.is_empty() || prefix.starts_with('1') {
+        return None;
+    }
+    let mut value = BigUint::from(0u8);
+    for b in prefix.bytes() {
+        value *= 58u8;
+        value += ALPHABET.iter().position(|&c| c == b)?;
+    }
+    let minimum = BigUint::one() << 248usize;
+    let maximum = (BigUint::one() << 256usize) - 1u8;
+    let to_bytes = |n: &BigUint| {
+        let v = n.to_bytes_be();
+        let mut out = [0u8; 32];
+        out[32 - v.len()..].copy_from_slice(&v);
+        out
+    };
+    let mut ranges = Vec::new();
+    let mut scale = BigUint::one();
+    for _ in prefix.len()..=MAX_PATTERN_LEN {
+        let lo = (&value * &scale).max(minimum.clone());
+        let hi = ((&value + 1u8) * &scale - 1u8).min(maximum.clone());
+        if lo <= hi {
+            ranges.push((to_bytes(&lo), to_bytes(&hi)));
+        }
+        scale *= 58u8;
+    }
+    Some(ranges)
 }
 
 #[inline]
@@ -412,6 +480,24 @@ mod tests {
         let pref_only =
             MatchTargets::new(&[("nope", "nope"), ("XkC", "")], false);
         assert_eq!(pref_only.match_mask(&bytes), 0b10);
+    }
+
+    #[test]
+    fn prefix_ranges_skip_leading_one_and_ci() {
+        assert!(prefix_ranges("Harmonic", false).is_some());
+        assert!(prefix_ranges("1abc", false).is_none());
+        assert!(prefix_ranges("Harmonic", true).is_none());
+        assert!(prefix_ranges("", false).is_none());
+    }
+
+    #[test]
+    fn prefix_only_range_agrees_with_encode() {
+        let key = "XkCriyrNwS3G4rzAXtG5B1nnvb5Ka1JtCku93VqeKAr";
+        let bytes = fd_bs58::decode_32(key).unwrap();
+        let hit = MatchTargets::new(&[("XkC", "")], false);
+        assert_eq!(hit.match_mask(&bytes), 0b1);
+        let miss = MatchTargets::new(&[("XkD", "")], false);
+        assert_eq!(miss.match_mask(&bytes), 0);
     }
 
     #[test]

@@ -28,6 +28,8 @@ VANITY_CUDA_ARCH=86 cargo install vanity --features=gpu
 
 If a launch prints `no kernel image is available for execution on the device`, the binary was built without your GPU's architecture — rebuild with the right `VANITY_CUDA_ARCH`.
 
+Keypair CUDA builds use a width-8 affine comb table by default. Wider tables do fewer additions per scalar; `VANITY_COMB_WIDTH` accepts 5 through 12 (8 is ~240M keys/s on a 4090).
+
 On machines without CUDA (AMD / Intel / Apple GPUs, or no NVIDIA driver), build the OpenCL backend instead:
 
 ```bash
@@ -210,7 +212,7 @@ Approximate single-device throughput:
 | Backend | Device | seeds/s | keypairs/s |
 | --- | --- | --- | --- |
 | CPU    | AMD EPYC 9275F (48 threads, AVX-512 IFMA) | ~201 M | ~33 M |
-| CUDA   | RTX 4090   | ~8.6B B | ~65 M  |
+| CUDA   | RTX 4090   | ~8.6B B | ~240 M |
 | OpenCL | Apple Silicon | ~315 M  | ~15 M  |
 
 `grind` is far faster because each attempt is just a SHA-256 hash. Keypair modes (`grind-keypair`/`grind-doppler`) perform full sha512 and ed25519 scalar multiplication per attempt. Throughput scales roughly linearly with `--num-gpus`.

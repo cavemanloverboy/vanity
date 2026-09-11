@@ -11,6 +11,7 @@ fn main() {
 fn build_cuda_libs() {
     println!("cargo::rerun-if-changed=kernels/");
     println!("cargo::rerun-if-env-changed=VANITY_CUDA_ARCH");
+    println!("cargo::rerun-if-env-changed=VANITY_COMB_WIDTH");
 
     let mut build = cc::Build::new();
     build
@@ -23,6 +24,23 @@ fn build_cuda_libs() {
         .file("kernels/base58.cu")
         .file("kernels/sha256.cu")
         .flag("-cudart=static");
+
+    // Wider tables save curve additions but use more memory. Default 8
+    // (~240M keypairs/s on a 4090); override with VANITY_COMB_WIDTH=5..12.
+    let comb_width = match std::env::var("VANITY_COMB_WIDTH") {
+        Ok(spec) if !spec.trim().is_empty() => spec
+            .trim()
+            .parse::<u8>()
+            .expect(
+                "VANITY_COMB_WIDTH must be an integer from 5 through 12",
+            ),
+        _ => 8,
+    };
+    assert!(
+        (5..=12).contains(&comb_width),
+        "VANITY_COMB_WIDTH must be an integer from 5 through 12"
+    );
+    build.flag(format!("-DCOMB_W={comb_width}"));
 
     // Which GPU architectures to generate code for. A cubin built for one
     // compute capability only runs on that capability (e.g. an sm_89 cubin
