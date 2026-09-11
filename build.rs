@@ -86,6 +86,7 @@ fn build_opencl_libs() {
     use std::path::Path;
 
     println!("cargo::rerun-if-changed=kernels/opencl/");
+    println!("cargo::rerun-if-changed=kernels/pattern_table.h");
 
     let out_dir = std::env::var("OUT_DIR").unwrap();
     let target_os =
@@ -130,7 +131,8 @@ fn build_opencl_libs() {
     let mut build = cc::Build::new();
     build
         .file("kernels/opencl/host.c")
-        .include(&out_dir);
+        .include(&out_dir)
+        .include("kernels");
     if target_os == "macos" {
         build.flag("-Wno-deprecated-declarations");
         // Pin the SDK so the OpenCL.framework headers resolve regardless of

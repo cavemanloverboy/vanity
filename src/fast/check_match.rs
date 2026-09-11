@@ -3,6 +3,7 @@ use fd_bs58::constants::{
 };
 
 pub const MAX_PATTERN_LEN: usize = 44;
+pub const MAX_PATTERNS: usize = 64;
 
 const ALPHABET: &[u8; 58] =
     b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -49,20 +50,37 @@ pub fn match_lut(case_insensitive: bool) -> &'static [u8; 58] {
     }
 }
 
-pub struct MatchTarget {
+struct PatternIdx {
     prefix_idx: [u8; MAX_PATTERN_LEN],
     prefix_len: u8,
     suffix_idx: [u8; MAX_PATTERN_LEN],
     suffix_len: u8,
+}
+
+/// One or more prefix/suffix pairs. A pubkey matches if it matches any pair.
+///
+/// GPU blob layout (little-endian), shared with CUDA / OpenCL:
+/// ```text
+/// u32 n
+/// u8  max_prefix_len
+/// u8  max_suffix_len
+/// n times: u8 plen, plen bytes, u8 slen, slen bytes
+/// ```
+/// Bytes are canonical raw_base58 indices, not ASCII.
+pub struct MatchTargets {
+    patterns: Vec<PatternIdx>,
     match_lut: &'static [u8; 58],
 }
 
-impl MatchTarget {
+impl MatchTargets {
     pub fn new(
-        prefix: &str,
-        suffix: &str,
+        patterns: &[(&str, &str)],
         case_insensitive: bool,
     ) -> Self {
+        assert!(
+            patterns.len() <= MAX_PATTERNS,
+            "at most {MAX_PATTERNS} patterns"
+        );
         let alphabet = if case_insensitive {
             ALPHABET_CI
         } else {
@@ -70,37 +88,84 @@ impl MatchTarget {
         };
         let lut = match_lut(case_insensitive);
 
-        let mut prefix_idx = [0u8; MAX_PATTERN_LEN];
-        debug_assert!(prefix.len() <= MAX_PATTERN_LEN);
-        for (i, &b) in prefix.as_bytes().iter().enumerate() {
-            prefix_idx[i] = char_to_canonical(b, alphabet, lut);
-        }
-
-        let mut suffix_idx = [0u8; MAX_PATTERN_LEN];
-        debug_assert!(suffix.len() <= MAX_PATTERN_LEN);
-        for (i, &b) in suffix.as_bytes().iter().enumerate() {
-            suffix_idx[i] = char_to_canonical(b, alphabet, lut);
+        let mut out = Vec::with_capacity(patterns.len());
+        for &(prefix, suffix) in patterns {
+            debug_assert!(prefix.len() <= MAX_PATTERN_LEN);
+            debug_assert!(suffix.len() <= MAX_PATTERN_LEN);
+            let mut prefix_idx = [0u8; MAX_PATTERN_LEN];
+            for (i, &b) in prefix.as_bytes().iter().enumerate() {
+                prefix_idx[i] = char_to_canonical(b, alphabet, lut);
+            }
+            let mut suffix_idx = [0u8; MAX_PATTERN_LEN];
+            for (i, &b) in suffix.as_bytes().iter().enumerate() {
+                suffix_idx[i] = char_to_canonical(b, alphabet, lut);
+            }
+            out.push(PatternIdx {
+                prefix_idx,
+                prefix_len: prefix.len() as u8,
+                suffix_idx,
+                suffix_len: suffix.len() as u8,
+            });
         }
 
         Self {
-            prefix_idx,
-            prefix_len: prefix.len() as u8,
-            suffix_idx,
-            suffix_len: suffix.len() as u8,
+            patterns: out,
             match_lut: lut,
         }
     }
 
+    /// Bit `i` is set when pattern `i` matches. Empty set → no match.
+    #[cfg(test)]
+    pub fn match_mask(&self, bytes: &[u8; 32]) -> u64 {
+        self.match_mask_active(bytes, u64::MAX)
+    }
+
+    /// Bit `i` is set when pattern `i` matches and that kind is in `active`.
     #[inline]
-    pub fn matches(&self, bytes: &[u8; 32]) -> bool {
-        check_match_32(
-            bytes,
-            &self.prefix_idx,
-            self.prefix_len,
-            &self.suffix_idx,
-            self.suffix_len,
-            self.match_lut,
-        )
+    pub fn match_mask_active(
+        &self,
+        bytes: &[u8; 32],
+        active: u64,
+    ) -> u64 {
+        check_match_32(bytes, &self.patterns, self.match_lut, active)
+    }
+
+    /// Canonical-index blob consumed by `gpu_grind_init` / `gpu_keypair_init`.
+    #[cfg(any(test, feature = "gpu"))]
+    pub fn gpu_blob(&self) -> Vec<u8> {
+        let max_prefix_len = self
+            .patterns
+            .iter()
+            .map(|p| p.prefix_len)
+            .max()
+            .unwrap_or(0);
+        let max_suffix_len = self
+            .patterns
+            .iter()
+            .map(|p| p.suffix_len)
+            .max()
+            .unwrap_or(0);
+        let mut v = Vec::with_capacity(
+            6 + self
+                .patterns
+                .iter()
+                .map(|p| {
+                    2 + p.prefix_len as usize + p.suffix_len as usize
+                })
+                .sum::<usize>(),
+        );
+        v.extend_from_slice(
+            &(self.patterns.len() as u32).to_le_bytes(),
+        );
+        v.push(max_prefix_len);
+        v.push(max_suffix_len);
+        for p in &self.patterns {
+            v.push(p.prefix_len);
+            v.extend_from_slice(&p.prefix_idx[..p.prefix_len as usize]);
+            v.push(p.suffix_len);
+            v.extend_from_slice(&p.suffix_idx[..p.suffix_len as usize]);
+        }
+        v
     }
 }
 
@@ -148,12 +213,10 @@ fn ensure_limb(
 #[inline]
 fn check_match_32(
     bytes: &[u8; 32],
-    prefix_idx: &[u8; MAX_PATTERN_LEN],
-    prefix_len: u8,
-    suffix_idx: &[u8; MAX_PATTERN_LEN],
-    suffix_len: u8,
+    patterns: &[PatternIdx],
     match_lut: &[u8; 58],
-) -> bool {
+    active: u64,
+) -> u64 {
     let mut in_leading_0s = 0usize;
     while in_leading_0s < 32 && bytes[in_leading_0s] == 0 {
         in_leading_0s += 1;
@@ -205,40 +268,56 @@ fn check_match_32(
     let skip = raw_leading_0s - in_leading_0s;
     let encoded_length = RAW58_SZ_32 - skip;
 
-    for i in 0..prefix_len as usize {
-        let target = prefix_idx[i];
-        let rb_idx = skip + i;
-        ensure_limb(
-            &intermediate,
-            &mut raw_base58,
-            &mut limbs_done,
-            rb_idx / 5,
-        );
-        if match_lut[raw_base58[rb_idx] as usize] != target {
-            return false;
-        }
+    if patterns.is_empty() {
+        return 1;
     }
 
-    if suffix_len > 0 {
-        let suffix_len = suffix_len as usize;
-        let tail_start = skip + encoded_length - suffix_len;
-        let last_limb = (skip + encoded_length - 1) / 5;
-        ensure_limb(
-            &intermediate,
-            &mut raw_base58,
-            &mut limbs_done,
-            last_limb,
-        );
-        for i in 0..suffix_len {
-            let target = suffix_idx[i];
-            if match_lut[raw_base58[tail_start + i] as usize] != target
+    // Same per-char early-reject walk as the original single-pattern
+    // matcher; extra patterns re-use already-emitted limbs.
+    let mut mask = 0u64;
+    for (pi, p) in patterns.iter().enumerate() {
+        if active & (1u64 << pi) == 0 {
+            continue;
+        }
+        let mut ok = true;
+        for i in 0..p.prefix_len as usize {
+            let rb_idx = skip + i;
+            ensure_limb(
+                &intermediate,
+                &mut raw_base58,
+                &mut limbs_done,
+                rb_idx / 5,
+            );
+            if match_lut[raw_base58[rb_idx] as usize] != p.prefix_idx[i]
             {
-                return false;
+                ok = false;
+                break;
             }
         }
+        if ok && p.suffix_len > 0 {
+            let suffix_len = p.suffix_len as usize;
+            let tail_start = skip + encoded_length - suffix_len;
+            let last_limb = (skip + encoded_length - 1) / 5;
+            ensure_limb(
+                &intermediate,
+                &mut raw_base58,
+                &mut limbs_done,
+                last_limb,
+            );
+            for i in 0..suffix_len {
+                if match_lut[raw_base58[tail_start + i] as usize]
+                    != p.suffix_idx[i]
+                {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            mask |= 1u64 << pi;
+        }
     }
-
-    true
+    mask
 }
 
 #[cfg(test)]
@@ -275,13 +354,13 @@ mod tests {
 
     #[test]
     fn agrees_with_full_encode_random() {
-        let target = MatchTarget::new("zz", "LM", false);
+        let target = MatchTargets::new(&[("zz", "LM")], false);
         for i in 0u32..5000 {
             let h: [u8; 64] = Sha512::digest(i.to_le_bytes()).into();
             let seed: [u8; 32] = h[..32].try_into().unwrap();
             let bytes = pubkey_of_seed(&seed);
             assert_eq!(
-                target.matches(&bytes),
+                target.match_mask(&bytes) != 0,
                 encode_matches(&bytes, "zz", "LM", false),
                 "seed {i}"
             );
@@ -290,14 +369,14 @@ mod tests {
 
     #[test]
     fn agrees_with_full_encode_ci() {
-        let target = MatchTarget::new("mithriL", "", true);
+        let target = MatchTargets::new(&[("mithriL", "")], true);
         for i in 0u32..2000 {
             let h: [u8; 64] =
                 Sha512::digest((i ^ 0xdeadbeef).to_le_bytes()).into();
             let seed: [u8; 32] = h[..32].try_into().unwrap();
             let bytes = pubkey_of_seed(&seed);
             assert_eq!(
-                target.matches(&bytes),
+                target.match_mask(&bytes) != 0,
                 encode_matches(&bytes, "mithriL", "", true),
                 "seed {i}"
             );
@@ -315,8 +394,33 @@ mod tests {
             let bytes = fd_bs58::decode_32(key).unwrap();
             let prefix = &key[..key.len().min(3)];
             let suffix = &key[key.len().saturating_sub(2)..];
-            let target = MatchTarget::new(prefix, suffix, false);
-            assert!(target.matches(&bytes), "{key}");
+            let target = MatchTargets::new(&[(prefix, suffix)], false);
+            assert!(target.match_mask(&bytes) != 0, "{key}");
         }
+    }
+
+    #[test]
+    fn or_of_two_patterns() {
+        let key = "XkCriyrNwS3G4rzAXtG5B1nnvb5Ka1JtCku93VqeKAr";
+        let bytes = fd_bs58::decode_32(key).unwrap();
+        let miss =
+            MatchTargets::new(&[("zzz", ""), ("aaa", "qq")], false);
+        assert_eq!(miss.match_mask(&bytes), 0);
+        let hit =
+            MatchTargets::new(&[("zzz", ""), ("XkC", "KAr")], false);
+        assert_eq!(hit.match_mask(&bytes), 0b10);
+        let pref_only =
+            MatchTargets::new(&[("nope", "nope"), ("XkC", "")], false);
+        assert_eq!(pref_only.match_mask(&bytes), 0b10);
+    }
+
+    #[test]
+    fn gpu_blob_roundtrip_header() {
+        let t = MatchTargets::new(&[("ab", "xy"), ("Z", "")], false);
+        let blob = t.gpu_blob();
+        assert_eq!(&blob[..4], &2u32.to_le_bytes());
+        assert_eq!(blob[4], 2); // max prefix
+        assert_eq!(blob[5], 2); // max suffix
+        assert_eq!(blob[6], 2); // plen of first
     }
 }

@@ -79,14 +79,25 @@ __kernel void vanity_search(
     __constant const WORD *W1,           /* 64 */
     __constant const uchar *glyph,       /* 256 */
     __constant const uchar *match_lut,   /* 58 */
-    __global const uchar *target, uint target_len,
-    __global const uchar *suffix, uint suffix_len,
+    __constant const uchar *patterns,
     __global uchar *out,                 /* 16 bytes: matched seed16 */
     __global volatile int *done,
     __global uint *counts,
     uint max_iters)
 {
     ulong idx = get_global_id(0);
+
+    uint n_pat = (uint)patterns[0] | ((uint)patterns[1] << 8)
+               | ((uint)patterns[2] << 16) | ((uint)patterns[3] << 24);
+    ulong target_len = 0, suffix_len = 0;
+    __constant const uchar *target = patterns;
+    __constant const uchar *suffix = patterns;
+    if (n_pat == 1) {
+        target_len = (ulong)patterns[VANITY_PT_PLEN];
+        target = patterns + VANITY_PT_PREF;
+        suffix_len = (ulong)patterns[VANITY_PT_SLEN];
+        suffix = patterns + VANITY_PT_SUF;
+    }
 
     /* Bootstrap per-work-item digest: byte-form seed with idx mixed into
        each 64-bit lane, then packed once into 8 big-endian words. */
@@ -122,8 +133,11 @@ __kernel void vanity_search(
 
         vanity_pubkey_sha256_words(seed_words, digest_words, W0_fixed, state_r7, W1);
 
-        if (fd_base58_check_match_32_words(digest_words, target, target_len,
-                                           suffix, suffix_len, match_lut)) {
+        bool hit = (n_pat <= 1)
+            ? fd_base58_check_match_32_words(digest_words, target, target_len,
+                                             suffix, suffix_len, match_lut)
+            : fd_base58_check_match_any_32_words(digest_words, patterns, match_lut);
+        if (hit) {
             if (atomic_cmpxchg(done, 0, 1) == 0) {
                 for (int k = 0; k < 4; ++k) {
                     WORD w = seed_words[k];

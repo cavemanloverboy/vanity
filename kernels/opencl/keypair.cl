@@ -22,8 +22,7 @@
 __kernel void vanity_keypair_search(
     __global const uchar *host_seed,     /* 32 bytes */
     __constant const uchar *match_lut,   /* 58 */
-    __global const uchar *prefix, uint prefix_len,
-    __global const uchar *suffix, uint suffix_len,
+    __constant const uchar *patterns,
     __global uchar *out,                 /* 32 bytes: matched seed */
     __global volatile int *done,
     __global uint *counts,
@@ -31,6 +30,18 @@ __kernel void vanity_keypair_search(
     uint max_iters)
 {
     ulong idx = get_global_id(0);
+
+    uint n_pat = (uint)patterns[0] | ((uint)patterns[1] << 8)
+               | ((uint)patterns[2] << 16) | ((uint)patterns[3] << 24);
+    uint prefix_len = 0, suffix_len = 0;
+    __constant const uchar *prefix = patterns;
+    __constant const uchar *suffix = patterns;
+    if (n_pat == 1) {
+        prefix_len = (uint)patterns[VANITY_PT_PLEN];
+        prefix = patterns + VANITY_PT_PREF;
+        suffix_len = (uint)patterns[VANITY_PT_SLEN];
+        suffix = patterns + VANITY_PT_SUF;
+    }
 
     uchar seed[32];
     uchar privatek[64];
@@ -108,8 +119,11 @@ __kernel void vanity_keypair_search(
                                 | ((uint)pubkey[4*k + 3]      );
             }
 
-            if (fd_base58_check_match_32_words(pubkey_words, prefix, prefix_len,
-                                               suffix, suffix_len, match_lut)) {
+            bool hit = (n_pat <= 1)
+                ? fd_base58_check_match_32_words(pubkey_words, prefix, prefix_len,
+                                                 suffix, suffix_len, match_lut)
+                : fd_base58_check_match_any_32_words(pubkey_words, patterns, match_lut);
+            if (hit) {
                 if (atomic_cmpxchg(done, 0, 1) == 0)
                     for (int i = 0; i < 32; i++) out[i] = batch_seeds[j][i];
                 matched = j;

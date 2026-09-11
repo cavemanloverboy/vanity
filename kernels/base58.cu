@@ -1,3 +1,5 @@
+#include <string.h>
+#include <cuda_runtime.h>
 #include "base58.h"
 
 __device__ uint8_t const base58_chars[] = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -10,6 +12,30 @@ __device__ uint8_t const base58_chars_ci[] = "123456789abcdefghjkLmnpqrstuvwxyza
    the same character to a single canonical index, so the inner compare
    is always raw_base58[i] -> d_match_lut[...] vs precomputed target. */
 __constant__ uint8_t d_match_lut[58];
+
+#include "pattern_table.h"
+
+__constant__ uint32_t d_n_patterns;
+__constant__ unsigned long long d_active_mask = ~0ULL;
+__constant__ uint8_t d_prefix_len[VANITY_MAX_PATTERNS];
+__constant__ uint8_t d_suffix_len[VANITY_MAX_PATTERNS];
+__constant__ uint8_t d_prefix[VANITY_MAX_PATTERNS][VANITY_MAX_PATTERN_LEN];
+__constant__ uint8_t d_suffix[VANITY_MAX_PATTERNS][VANITY_MAX_PATTERN_LEN];
+
+extern "C" void vanity_upload_pattern_table(const uint8_t *blob, uint64_t blob_len)
+{
+    uint8_t flat[VANITY_PT_SIZE];
+    vanity_unpack_patterns(blob, blob_len, flat);
+    uint32_t n = 0;
+    memcpy(&n, flat + VANITY_PT_N, 4);
+    cudaMemcpyToSymbol(d_n_patterns, &n, 4);
+    cudaMemcpyToSymbol(d_prefix_len, flat + VANITY_PT_PLEN, VANITY_MAX_PATTERNS);
+    cudaMemcpyToSymbol(d_suffix_len, flat + VANITY_PT_SLEN, VANITY_MAX_PATTERNS);
+    cudaMemcpyToSymbol(d_prefix, flat + VANITY_PT_PREF,
+                       VANITY_MAX_PATTERNS * VANITY_MAX_PATTERN_LEN);
+    cudaMemcpyToSymbol(d_suffix, flat + VANITY_PT_SUF,
+                       VANITY_MAX_PATTERNS * VANITY_MAX_PATTERN_LEN);
+}
 
 #define BASE58_INVALID_CHAR ((uint8_t)255)
 #define BASE58_INVERSE_TABLE_OFFSET ((uint8_t)'1')

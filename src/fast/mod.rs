@@ -4,12 +4,12 @@ mod group;
 pub mod sha512_simd;
 pub mod simd;
 
-use check_match::MatchTarget;
+pub use check_match::{MatchTargets, MAX_PATTERNS, MAX_PATTERN_LEN};
 use field::{batch_invert, Fe};
 use group::{edwards_d2, Niels, Point};
 
 use crate::{
-    check_write_permissions, save_keypair, ABORTED, FOUND,
+    check_write_permissions, credit_kinds, save_keypair, ABORTED,
     TOTAL_ATTEMPTS,
 };
 use sha2::{Digest, Sha512};
@@ -195,7 +195,11 @@ unsafe fn keygen_batch_simd(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512ifma,avx512dq")]
-unsafe fn grind_thread_simd(target: &MatchTarget, count: u32) {
+unsafe fn grind_thread_simd(
+    target: &MatchTargets,
+    min_count: u32,
+    max_count: u32,
+) {
     check_write_permissions();
     let mut seeds: [[u8; 32]; BATCH] = [[0u8; 32]; BATCH];
     for s in seeds.iter_mut() {
@@ -206,7 +210,7 @@ unsafe fn grind_thread_simd(target: &MatchTarget, count: u32) {
     let mut local: u64 = 0;
 
     loop {
-        if grind_done(count) {
+        if grind_done(min_count) {
             break;
         }
         keygen_batch_simd(&mut seeds, &mut used, &mut pubkeys);
@@ -216,21 +220,28 @@ unsafe fn grind_thread_simd(target: &MatchTarget, count: u32) {
             local = 0;
         }
         for j in 0..BATCH {
-            if target.matches(&pubkeys[j]) {
-                let prev = FOUND.fetch_add(1, Ordering::SeqCst);
-                if prev < count {
-                    let s = fd_bs58::encode_32(pubkeys[j]);
-                    eprintln!("\r\x1b[Kmatch: {s}");
+            let mask = target.match_mask_active(
+                &pubkeys[j],
+                crate::unfilled_mask(max_count),
+            );
+            if mask != 0 && credit_kinds(mask, max_count) {
+                let s = fd_bs58::encode_32(pubkeys[j]);
+                crate::ui_with_match(|| {
+                    eprintln!("match: {s}");
                     eprintln!("pubkey: {s}");
                     save_keypair(&used[j], &pubkeys[j], &s);
-                }
+                });
             }
         }
     }
     TOTAL_ATTEMPTS.fetch_add(local, Ordering::Relaxed);
 }
 
-fn grind_thread_scalar(target: &MatchTarget, count: u32) {
+fn grind_thread_scalar(
+    target: &MatchTargets,
+    min_count: u32,
+    max_count: u32,
+) {
     check_write_permissions();
     let mut seeds: [[u8; 32]; BATCH] = [[0u8; 32]; BATCH];
     for s in seeds.iter_mut() {
@@ -241,7 +252,7 @@ fn grind_thread_scalar(target: &MatchTarget, count: u32) {
     let mut local: u64 = 0;
 
     loop {
-        if grind_done(count) {
+        if grind_done(min_count) {
             break;
         }
         keygen_batch(&mut seeds, &mut used, &mut pubkeys);
@@ -251,14 +262,17 @@ fn grind_thread_scalar(target: &MatchTarget, count: u32) {
             local = 0;
         }
         for j in 0..BATCH {
-            if target.matches(&pubkeys[j]) {
-                let prev = FOUND.fetch_add(1, Ordering::SeqCst);
-                if prev < count {
-                    let s = fd_bs58::encode_32(pubkeys[j]);
-                    eprintln!("\r\x1b[Kmatch: {s}");
+            let mask = target.match_mask_active(
+                &pubkeys[j],
+                crate::unfilled_mask(max_count),
+            );
+            if mask != 0 && credit_kinds(mask, max_count) {
+                let s = fd_bs58::encode_32(pubkeys[j]);
+                crate::ui_with_match(|| {
+                    eprintln!("match: {s}");
                     eprintln!("pubkey: {s}");
                     save_keypair(&used[j], &pubkeys[j], &s);
-                }
+                });
             }
         }
     }
@@ -267,8 +281,7 @@ fn grind_thread_scalar(target: &MatchTarget, count: u32) {
 
 #[inline(always)]
 fn grind_done(count: u32) -> bool {
-    FOUND.load(Ordering::Relaxed) >= count
-        || ABORTED.load(Ordering::Relaxed)
+    crate::quotas_filled(count) || ABORTED.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -285,20 +298,12 @@ pub fn pubkey_of_seed(seed: &[u8; 32]) -> [u8; 32] {
 
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
-pub fn reset_grind() {
-    FOUND.store(0, Ordering::SeqCst);
-    TOTAL_ATTEMPTS.store(0, Ordering::SeqCst);
-    ABORTED.store(false, Ordering::SeqCst);
+pub fn reset_grind(n_kinds: usize) {
+    crate::start_grind(n_kinds);
 }
 
 pub fn request_abort() {
     ABORTED.store(true, Ordering::SeqCst);
-}
-
-/// Returns the previous found count (caller should print only if `prev < count`).
-#[cfg(feature = "gpu")]
-pub fn note_found() -> u32 {
-    FOUND.fetch_add(1, Ordering::SeqCst)
 }
 
 #[cfg(feature = "gpu")]
@@ -318,31 +323,31 @@ pub fn backend_name() -> &'static str {
     }
 }
 
-/// Run batched CPU keypair workers until `count` matches or abort.
-/// Call [`reset_grind`] first if coordinating with a GPU thread that shares
-/// these counters via [`add_attempts`] / [`note_found`] / [`is_done`].
+/// Run batched CPU keypair workers until `min_count` hits of each
+/// pattern or abort. Extra hits are kept up to `max_count`. Call
+/// [`reset_grind`] first if coordinating with a GPU thread that shares
+/// these counters via [`is_done`].
 pub fn run_cpu_workers(
-    prefix: &'static str,
-    suffix: &'static str,
-    case_insensitive: bool,
+    target: &MatchTargets,
     num_cpus: u32,
-    count: u32,
+    min_count: u32,
+    max_count: u32,
 ) {
-    let target = MatchTarget::new(prefix, suffix, case_insensitive);
-
     (0..num_cpus)
         .into_par_iter()
         .for_each(|_| {
             #[cfg(target_arch = "x86_64")]
             {
                 if simd::available() {
-                    unsafe { grind_thread_simd(&target, count) };
+                    unsafe {
+                        grind_thread_simd(target, min_count, max_count)
+                    };
                 } else {
-                    grind_thread_scalar(&target, count);
+                    grind_thread_scalar(target, min_count, max_count);
                 }
             }
             #[cfg(not(target_arch = "x86_64"))]
-            grind_thread_scalar(&target, count);
+            grind_thread_scalar(target, min_count, max_count);
         });
 }
 

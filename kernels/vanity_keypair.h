@@ -3,11 +3,12 @@
 
 #include <stdint.h>
 
-extern "C" void* gpu_keypair_init(int id, uint8_t *prefix, uint64_t prefix_len, uint8_t *suffix, uint64_t suffix_len, bool case_insensitive);
+extern "C" void* gpu_keypair_init(int id, uint8_t *patterns, uint64_t patterns_len, bool case_insensitive);
 extern "C" void  gpu_keypair_launch(void *ctx, uint8_t *seed);
 extern "C" int   gpu_keypair_query(void *ctx);
 extern "C" void  gpu_keypair_read(void *ctx, uint8_t *out);
 extern "C" void  gpu_keypair_destroy(void *ctx);
+extern "C" void  gpu_keypair_set_active_mask(void *ctx, unsigned long long mask);
 
 /* "doppler" keypair grind: matches ed25519 pubkeys with at least
    required_segments sign-extendable 32-bit segments (see kernels/opencl/

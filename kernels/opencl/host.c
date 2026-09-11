@@ -27,6 +27,7 @@
 #include <time.h>
 
 #include "cl_sources.h"
+#include "pattern_table.h"
 
 /* ─── tunables ──────────────────────────────────────────────────────────── */
 
@@ -176,9 +177,8 @@ typedef struct {
     cl_command_queue queue;
     cl_program       program;
     cl_kernel        kernel;
-    cl_mem  seed, w0, sr7, w1, glyph, mlut, target, suffix, out, done, counts;
+    cl_mem  seed, w0, sr7, w1, glyph, mlut, patterns, out, done, counts;
     size_t  local, global;
-    uint32_t target_len, suffix_len;
     uint32_t max_iters;
     cl_event event;
     int      in_flight;
@@ -187,8 +187,7 @@ typedef struct {
 } GrindCtx;
 
 void *gpu_grind_init(int id, uint8_t *base, uint8_t *owner,
-                     uint8_t *target, uint64_t target_len,
-                     uint8_t *suffix, uint64_t suffix_len,
+                     uint8_t *patterns, uint64_t patterns_len,
                      bool case_insensitive) {
     cl_platform_id plat;
     cl_device_id dev = select_device(id, &plat);
@@ -207,8 +206,6 @@ void *gpu_grind_init(int id, uint8_t *base, uint8_t *owner,
 
     c->local  = clamp_local(dev, GRIND_LOCAL);
     c->global = (size_t)compute_units(dev) * GRIND_WAVES * c->local;
-    c->target_len = (uint32_t)target_len;
-    c->suffix_len = (uint32_t)suffix_len;
     c->max_iters  = GRIND_ITERS_INIT;
     c->counts_host = (uint32_t *)malloc(c->global * sizeof(uint32_t));
 
@@ -225,20 +222,6 @@ void *gpu_grind_init(int id, uint8_t *base, uint8_t *owner,
         for (int j = 0; j < i; ++j)
             if (alphabet[j] == alphabet[i]) { match_lut[i] = (uint8_t)j; break; }
     }
-    uint8_t target_idx[64], suffix_idx[64];
-    for (uint64_t i = 0; i < target_len; ++i) {
-        uint8_t v = 255;
-        for (int k = 0; k < 58; ++k)
-            if ((uint8_t)alphabet[k] == target[i]) { v = match_lut[k]; break; }
-        target_idx[i] = v;
-    }
-    for (uint64_t i = 0; i < suffix_len; ++i) {
-        uint8_t v = 255;
-        for (int k = 0; k < 58; ++k)
-            if ((uint8_t)alphabet[k] == suffix[i]) { v = match_lut[k]; break; }
-        suffix_idx[i] = v;
-    }
-
     /* SHA-256 block-1 schedule from owner[16..32] (loop invariant). */
     uint32_t W1[64];
     {
@@ -281,11 +264,13 @@ void *gpu_grind_init(int id, uint8_t *base, uint8_t *owner,
     c->w0     = buf_copy(c->context, sizeof W0, W0);
     c->sr7    = buf_copy(c->context, sizeof SR7, SR7);
     c->w1     = buf_copy(c->context, sizeof W1, W1);
+    uint8_t ptable[VANITY_PT_SIZE];
+    vanity_unpack_patterns(patterns, patterns_len, ptable);
+
     c->glyph  = buf_copy(c->context, sizeof glyph, glyph);
-    c->mlut   = buf_copy(c->context, sizeof match_lut, match_lut);
-    c->target = buf_copy(c->context, target_len, target_idx);
-    c->suffix = buf_copy(c->context, suffix_len, suffix_idx);
-    c->out    = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, 16, NULL, &err); CK(err, "buf out");
+    c->mlut     = buf_copy(c->context, sizeof match_lut, match_lut);
+    c->patterns = buf_copy(c->context, VANITY_PT_SIZE, ptable);
+    c->out      = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, 16, NULL, &err); CK(err, "buf out");
     c->done   = clCreateBuffer(c->context, CL_MEM_READ_WRITE, sizeof(cl_int), NULL, &err); CK(err, "buf done");
     c->counts = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, c->global * sizeof(cl_uint), NULL, &err); CK(err, "buf counts");
 
@@ -295,13 +280,10 @@ void *gpu_grind_init(int id, uint8_t *base, uint8_t *owner,
     CK(clSetKernelArg(c->kernel, 3, sizeof(cl_mem), &c->w1),     "arg w1");
     CK(clSetKernelArg(c->kernel, 4, sizeof(cl_mem), &c->glyph),  "arg glyph");
     CK(clSetKernelArg(c->kernel, 5, sizeof(cl_mem), &c->mlut),   "arg mlut");
-    CK(clSetKernelArg(c->kernel, 6, sizeof(cl_mem), &c->target), "arg target");
-    CK(clSetKernelArg(c->kernel, 7, sizeof(cl_uint), &c->target_len), "arg target_len");
-    CK(clSetKernelArg(c->kernel, 8, sizeof(cl_mem), &c->suffix), "arg suffix");
-    CK(clSetKernelArg(c->kernel, 9, sizeof(cl_uint), &c->suffix_len), "arg suffix_len");
-    CK(clSetKernelArg(c->kernel, 10, sizeof(cl_mem), &c->out),   "arg out");
-    CK(clSetKernelArg(c->kernel, 11, sizeof(cl_mem), &c->done),  "arg done");
-    CK(clSetKernelArg(c->kernel, 12, sizeof(cl_mem), &c->counts),"arg counts");
+    CK(clSetKernelArg(c->kernel, 6, sizeof(cl_mem), &c->patterns), "arg patterns");
+    CK(clSetKernelArg(c->kernel, 7, sizeof(cl_mem), &c->out),   "arg out");
+    CK(clSetKernelArg(c->kernel, 8, sizeof(cl_mem), &c->done),  "arg done");
+    CK(clSetKernelArg(c->kernel, 9, sizeof(cl_mem), &c->counts),"arg counts");
 
     return c;
 }
@@ -316,7 +298,7 @@ void gpu_grind_launch(void *opaque, uint8_t *seed) {
     CK(clEnqueueWriteBuffer(c->queue, c->out, CL_FALSE, 0, 16, out_zero, 0, NULL, NULL), "clear out");
     CK(clEnqueueWriteBuffer(c->queue, c->done, CL_FALSE, 0, sizeof zero, &zero, 0, NULL, NULL), "write done");
     CK(clSetKernelArg(c->kernel, 0, sizeof(cl_mem), &c->seed), "arg seed");
-    CK(clSetKernelArg(c->kernel, 13, sizeof(cl_uint), &c->max_iters), "arg max_iters");
+    CK(clSetKernelArg(c->kernel, 10, sizeof(cl_uint), &c->max_iters), "arg max_iters");
 
     c->launch_time = now_sec();
     CK(clEnqueueNDRangeKernel(c->queue, c->kernel, 1, NULL, &c->global, &c->local, 0, NULL, &c->event),
@@ -352,11 +334,18 @@ void gpu_grind_read(void *opaque, uint8_t *out) {
     c->max_iters = adapt_iters(c->max_iters, elapsed, GRIND_ITERS_MIN, GRIND_ITERS_MAX);
 }
 
+void gpu_grind_set_active_mask(void *opaque, unsigned long long mask) {
+    GrindCtx *c = (GrindCtx *)opaque;
+    CK(clEnqueueWriteBuffer(c->queue, c->patterns, CL_TRUE,
+                            VANITY_PT_ACTIVE, sizeof(mask), &mask,
+                            0, NULL, NULL), "active mask");
+}
+
 void gpu_grind_destroy(void *opaque) {
     GrindCtx *c = (GrindCtx *)opaque;
     clFinish(c->queue);
     if (c->in_flight) clReleaseEvent(c->event);
-    cl_mem bufs[] = {c->seed,c->w0,c->sr7,c->w1,c->glyph,c->mlut,c->target,c->suffix,c->out,c->done,c->counts};
+    cl_mem bufs[] = {c->seed,c->w0,c->sr7,c->w1,c->glyph,c->mlut,c->patterns,c->out,c->done,c->counts};
     for (size_t i = 0; i < sizeof bufs / sizeof bufs[0]; ++i) clReleaseMemObject(bufs[i]);
     clReleaseKernel(c->kernel);
     clReleaseProgram(c->program);
@@ -373,9 +362,8 @@ typedef struct {
     cl_command_queue queue;
     cl_program       program;
     cl_kernel        kernel;
-    cl_mem  seed, mlut, prefix, suffix, out, done, counts, comb;
+    cl_mem  seed, mlut, patterns, out, done, counts, comb;
     size_t  local, global;
-    uint32_t prefix_len, suffix_len;
     uint32_t max_iters;
     cl_event event;
     int      in_flight;
@@ -387,8 +375,8 @@ typedef struct {
 #define COMB_NIELS_BYTES 160u
 #define COMB_TABLE_BYTES (52u * 16u * COMB_NIELS_BYTES)
 
-void *gpu_keypair_init(int id, uint8_t *prefix, uint64_t prefix_len,
-                       uint8_t *suffix, uint64_t suffix_len, bool case_insensitive) {
+void *gpu_keypair_init(int id, uint8_t *patterns, uint64_t patterns_len,
+                       bool case_insensitive) {
     cl_platform_id plat;
     cl_device_id dev = select_device(id, &plat);
     cl_int err;
@@ -406,8 +394,6 @@ void *gpu_keypair_init(int id, uint8_t *prefix, uint64_t prefix_len,
 
     c->local  = clamp_local(dev, KP_LOCAL);
     c->global = (size_t)compute_units(dev) * KP_WAVES * c->local;
-    c->prefix_len = (uint32_t)prefix_len;
-    c->suffix_len = (uint32_t)suffix_len;
     c->max_iters = KP_ITERS_INIT;
     c->counts_host = (uint32_t *)malloc(c->global * sizeof(uint32_t));
 
@@ -425,24 +411,12 @@ void *gpu_keypair_init(int id, uint8_t *prefix, uint64_t prefix_len,
         for (int j = 0; j < i; ++j)
             if (alphabet[j] == alphabet[i]) { match_lut[i] = (uint8_t)j; break; }
     }
-    uint8_t prefix_idx[64], suffix_idx[64];
-    for (uint64_t i = 0; i < prefix_len; ++i) {
-        uint8_t v = 255;
-        for (int k = 0; k < 58; ++k)
-            if ((uint8_t)alphabet[k] == prefix[i]) { v = match_lut[k]; break; }
-        prefix_idx[i] = v;
-    }
-    for (uint64_t i = 0; i < suffix_len; ++i) {
-        uint8_t v = 255;
-        for (int k = 0; k < 58; ++k)
-            if ((uint8_t)alphabet[k] == suffix[i]) { v = match_lut[k]; break; }
-        suffix_idx[i] = v;
-    }
+    uint8_t ptable[VANITY_PT_SIZE];
+    vanity_unpack_patterns(patterns, patterns_len, ptable);
 
-    c->seed   = clCreateBuffer(c->context, CL_MEM_READ_ONLY, 32, NULL, &err); CK(err, "buf seed");
-    c->mlut   = buf_copy(c->context, sizeof match_lut, match_lut);
-    c->prefix = buf_copy(c->context, prefix_len, prefix_idx);
-    c->suffix = buf_copy(c->context, suffix_len, suffix_idx);
+    c->seed     = clCreateBuffer(c->context, CL_MEM_READ_ONLY, 32, NULL, &err); CK(err, "buf seed");
+    c->mlut     = buf_copy(c->context, sizeof match_lut, match_lut);
+    c->patterns = buf_copy(c->context, VANITY_PT_SIZE, ptable);
     c->out    = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, 32, NULL, &err); CK(err, "buf out");
     c->done   = clCreateBuffer(c->context, CL_MEM_READ_WRITE, sizeof(cl_int), NULL, &err); CK(err, "buf done");
     c->counts = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, c->global * sizeof(cl_uint), NULL, &err); CK(err, "buf counts");
@@ -461,14 +435,11 @@ void *gpu_keypair_init(int id, uint8_t *prefix, uint64_t prefix_len,
     }
 
     CK(clSetKernelArg(c->kernel, 1, sizeof(cl_mem), &c->mlut), "arg mlut");
-    CK(clSetKernelArg(c->kernel, 2, sizeof(cl_mem), &c->prefix), "arg prefix");
-    CK(clSetKernelArg(c->kernel, 3, sizeof(cl_uint), &c->prefix_len), "arg prefix_len");
-    CK(clSetKernelArg(c->kernel, 4, sizeof(cl_mem), &c->suffix), "arg suffix");
-    CK(clSetKernelArg(c->kernel, 5, sizeof(cl_uint), &c->suffix_len), "arg suffix_len");
-    CK(clSetKernelArg(c->kernel, 6, sizeof(cl_mem), &c->out), "arg out");
-    CK(clSetKernelArg(c->kernel, 7, sizeof(cl_mem), &c->done), "arg done");
-    CK(clSetKernelArg(c->kernel, 8, sizeof(cl_mem), &c->counts), "arg counts");
-    CK(clSetKernelArg(c->kernel, 9, sizeof(cl_mem), &c->comb), "arg comb");
+    CK(clSetKernelArg(c->kernel, 2, sizeof(cl_mem), &c->patterns), "arg patterns");
+    CK(clSetKernelArg(c->kernel, 3, sizeof(cl_mem), &c->out), "arg out");
+    CK(clSetKernelArg(c->kernel, 4, sizeof(cl_mem), &c->done), "arg done");
+    CK(clSetKernelArg(c->kernel, 5, sizeof(cl_mem), &c->counts), "arg counts");
+    CK(clSetKernelArg(c->kernel, 6, sizeof(cl_mem), &c->comb), "arg comb");
 
     return c;
 }
@@ -483,7 +454,7 @@ void gpu_keypair_launch(void *opaque, uint8_t *seed) {
     CK(clEnqueueWriteBuffer(c->queue, c->out, CL_FALSE, 0, 32, out_zero, 0, NULL, NULL), "clear out");
     CK(clEnqueueWriteBuffer(c->queue, c->done, CL_FALSE, 0, sizeof zero, &zero, 0, NULL, NULL), "write done");
     CK(clSetKernelArg(c->kernel, 0, sizeof(cl_mem), &c->seed), "arg seed");
-    CK(clSetKernelArg(c->kernel, 10, sizeof(cl_uint), &c->max_iters), "arg max_iters");
+    CK(clSetKernelArg(c->kernel, 7, sizeof(cl_uint), &c->max_iters), "arg max_iters");
 
     c->launch_time = now_sec();
     CK(clEnqueueNDRangeKernel(c->queue, c->kernel, 1, NULL, &c->global, &c->local, 0, NULL, &c->event),
@@ -519,11 +490,18 @@ void gpu_keypair_read(void *opaque, uint8_t *out) {
     c->max_iters = adapt_iters(c->max_iters, elapsed, KP_ITERS_MIN, KP_ITERS_MAX);
 }
 
+void gpu_keypair_set_active_mask(void *opaque, unsigned long long mask) {
+    KeypairCtx *c = (KeypairCtx *)opaque;
+    CK(clEnqueueWriteBuffer(c->queue, c->patterns, CL_TRUE,
+                            VANITY_PT_ACTIVE, sizeof(mask), &mask,
+                            0, NULL, NULL), "active mask");
+}
+
 void gpu_keypair_destroy(void *opaque) {
     KeypairCtx *c = (KeypairCtx *)opaque;
     clFinish(c->queue);
     if (c->in_flight) clReleaseEvent(c->event);
-    cl_mem bufs[] = {c->seed,c->mlut,c->prefix,c->suffix,c->out,c->done,c->counts,c->comb};
+    cl_mem bufs[] = {c->seed,c->mlut,c->patterns,c->out,c->done,c->counts,c->comb};
     for (size_t i = 0; i < sizeof bufs / sizeof bufs[0]; ++i) clReleaseMemObject(bufs[i]);
     clReleaseKernel(c->kernel);
     clReleaseProgram(c->program);

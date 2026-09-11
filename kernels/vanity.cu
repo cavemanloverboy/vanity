@@ -120,14 +120,14 @@ typedef struct {
     int num_threads;
     unsigned long long target_cycles;
     uint64_t out_offset;
+    int multi;
 } GpuGrindCtx;
 
 extern "C" void* gpu_grind_init(
     int id,
     uint8_t *base,
     uint8_t *owner,
-    uint8_t *target, uint64_t target_len,
-    uint8_t *suffix, uint64_t suffix_len,
+    uint8_t *patterns, uint64_t patterns_len,
     bool case_insensitive)
 {
     cudaSetDevice(id);
@@ -159,9 +159,9 @@ extern "C" void* gpu_grind_init(
 
     cudaStreamCreate(&ctx->stream);
 
-    // Buffer: [seed:32] [base:32] [owner:32] [target_len:8] [target:N] [suffix_len:8] [suffix:M] [out:16]
-    uint64_t buf_size = 32 + 32 + 32 + 8 + target_len + 8 + suffix_len + 16;
-    ctx->out_offset = 32 + 32 + 32 + 8 + target_len + 8 + suffix_len;
+    // Buffer: [seed:32] [base:32] [owner:32] [pat_len:8] [patterns:N] [out:16]
+    uint64_t buf_size = 32 + 32 + 32 + 8 + patterns_len + 16;
+    ctx->out_offset = 32 + 32 + 32 + 8 + patterns_len;
 
     err = cudaMalloc((void**)&ctx->d_buffer, buf_size);
     if (err != cudaSuccess) {
@@ -191,30 +191,17 @@ extern "C" void* gpu_grind_init(
         }
     }
 
-    /* Translate ASCII target/suffix to canonical indices in host buffers. */
-    uint8_t target_idx[64];
-    uint8_t suffix_idx[64];
-    for (uint64_t i = 0; i < target_len; ++i) {
-        uint8_t v = 255;
-        for (int k = 0; k < 58; ++k) {
-            if ((uint8_t)alphabet[k] == target[i]) { v = host_match_lut[k]; break; }
-        }
-        target_idx[i] = v;
-    }
-    for (uint64_t i = 0; i < suffix_len; ++i) {
-        uint8_t v = 255;
-        for (int k = 0; k < 58; ++k) {
-            if ((uint8_t)alphabet[k] == suffix[i]) { v = host_match_lut[k]; break; }
-        }
-        suffix_idx[i] = v;
-    }
+    uint32_t n_pat = 0;
+    if (patterns_len >= 4) memcpy(&n_pat, patterns, 4);
+    ctx->multi = n_pat > 1;
+    if (ctx->multi)
+        vanity_upload_pattern_table(patterns, patterns_len);
 
     cudaMemcpy(ctx->d_buffer + 32, base, 32, cudaMemcpyHostToDevice);
     cudaMemcpy(ctx->d_buffer + 64, owner, 32, cudaMemcpyHostToDevice);
-    cudaMemcpy(ctx->d_buffer + 96, &target_len, 8, cudaMemcpyHostToDevice);
-    if (target_len > 0) cudaMemcpy(ctx->d_buffer + 104, target_idx, target_len, cudaMemcpyHostToDevice);
-    cudaMemcpy(ctx->d_buffer + 104 + target_len, &suffix_len, 8, cudaMemcpyHostToDevice);
-    if (suffix_len > 0) cudaMemcpy(ctx->d_buffer + 104 + target_len + 8, suffix_idx, suffix_len, cudaMemcpyHostToDevice);
+    cudaMemcpy(ctx->d_buffer + 96, &patterns_len, 8, cudaMemcpyHostToDevice);
+    if (patterns_len > 0)
+        cudaMemcpy(ctx->d_buffer + 104, patterns, patterns_len, cudaMemcpyHostToDevice);
 
     cudaMemcpyToSymbol(d_match_lut, host_match_lut, sizeof(host_match_lut));
 
@@ -290,6 +277,16 @@ extern "C" void* gpu_grind_init(
     return (void *)ctx;
 }
 
+extern "C" void gpu_grind_set_active_mask(void *opaque, unsigned long long mask)
+{
+    GpuGrindCtx *ctx = (GpuGrindCtx *)opaque;
+    cudaSetDevice(ctx->device_id);
+    cudaMemcpyToSymbol(d_active_mask, &mask, sizeof(mask));
+}
+
+template<bool MULTI>
+__global__ void vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles);
+
 extern "C" void gpu_grind_launch(void *opaque, uint8_t *seed)
 {
     GpuGrindCtx *ctx = (GpuGrindCtx *)opaque;
@@ -303,10 +300,17 @@ extern "C" void gpu_grind_launch(void *opaque, uint8_t *seed)
     cudaMemcpyToSymbol(done, &zero, sizeof(int));
     cudaMemcpyToSymbol(count, &zero_ull, sizeof(unsigned long long));
 
-    vanity_search<<<ctx->num_blocks, ctx->num_threads, 0, ctx->stream>>>(
-        ctx->d_buffer,
-        (uint64_t)ctx->num_blocks * ctx->num_threads,
-        ctx->target_cycles);
+    if (ctx->multi) {
+        vanity_search<true><<<ctx->num_blocks, ctx->num_threads, 0, ctx->stream>>>(
+            ctx->d_buffer,
+            (uint64_t)ctx->num_blocks * ctx->num_threads,
+            ctx->target_cycles);
+    } else {
+        vanity_search<false><<<ctx->num_blocks, ctx->num_threads, 0, ctx->stream>>>(
+            ctx->d_buffer,
+            (uint64_t)ctx->num_blocks * ctx->num_threads,
+            ctx->target_cycles);
+    }
 
     cudaError_t launch_err = cudaGetLastError();
     if (launch_err != cudaSuccess) {
@@ -347,18 +351,31 @@ extern "C" void gpu_grind_destroy(void *opaque)
 
 // ─── kernel ─────────────────────────────────────────────────────────────────
 
+template<bool MULTI>
 __global__ void __launch_bounds__(256, 3)
 vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
 {
     (void)stride;
     uint8_t *seed = buffer;
-    uint64_t target_len;
-    memcpy(&target_len, buffer + 96, 8);
-    uint8_t *target = buffer + 104;
-    uint64_t suffix_len;
-    memcpy(&suffix_len, buffer + 104 + target_len, 8);
-    uint8_t *suffix = buffer + 104 + target_len + 8;
-    uint8_t *out = (buffer + 104 + target_len + suffix_len + 8);
+    uint64_t pat_len;
+    memcpy(&pat_len, buffer + 96, 8);
+    uint8_t *patterns = buffer + 104;
+    uint8_t *out = buffer + 104 + pat_len;
+
+    /* Hoist the common 1-pattern case so the hot loop calls the original
+       forceinlined matcher (same register footprint / occupancy). */
+    uint32_t n_pat = 0;
+    memcpy(&n_pat, patterns, 4);
+    const uint8_t *target = patterns;
+    ulong target_len = 0;
+    const uint8_t *suffix = patterns;
+    ulong suffix_len = 0;
+    if (n_pat == 1) {
+        target_len = patterns[6];
+        target = patterns + 7;
+        suffix_len = patterns[7 + target_len];
+        suffix = patterns + 8 + target_len;
+    }
 
     uint64_t idx = blockIdx.x * blockDim.x + threadIdx.x;
 
@@ -420,7 +437,10 @@ vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles)
 
         vanity_pubkey_sha256_words(seed_words, digest_words);
 
-        if (fd_base58_check_match_32_words(digest_words, target, target_len, suffix, suffix_len))
+        bool hit = MULTI
+            ? fd_base58_check_match_any_32_words(digest_words)
+            : fd_base58_check_match_32_words(digest_words, target, target_len, suffix, suffix_len);
+        if (hit)
         {
             if (atomicMax(&done, 1) == 0)
             {
