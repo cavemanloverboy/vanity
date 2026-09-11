@@ -817,6 +817,12 @@ fn spawn_hashrate_reporter(
 use std::ffi::c_void;
 
 #[cfg(feature = "gpu")]
+#[derive(Clone, Copy)]
+struct GpuCtx(*mut c_void);
+#[cfg(feature = "gpu")]
+unsafe impl Send for GpuCtx {}
+
+#[cfg(feature = "gpu")]
 struct GpuOps {
     launch: unsafe extern "C" fn(*mut c_void, *const u8),
     query: unsafe extern "C" fn(*mut c_void) -> i32,
@@ -826,36 +832,57 @@ struct GpuOps {
     set_active_mask: Option<unsafe extern "C" fn(*mut c_void, u64)>,
 }
 
+/// Init each device (comb table, buffers). Call before the grind clock.
+#[cfg(feature = "gpu")]
+fn init_gpu_devices(
+    num_gpus: u32,
+    init: impl Fn(u32) -> *mut c_void,
+) -> Vec<GpuCtx> {
+    if num_gpus == 0 {
+        return Vec::new();
+    }
+    eprint!("building comb table…");
+    let _ = std::io::stderr().flush();
+    let t0 = Instant::now();
+    let contexts = (0..num_gpus)
+        .map(|id| GpuCtx(init(id)))
+        .collect();
+    eprintln!(
+        " ready ({})",
+        format_duration(t0.elapsed().as_secs_f64())
+    );
+    contexts
+}
+
 /// Drive `num_gpus` async kernel launches until the grind is done.
 ///
 /// `OUT` is the kernel's output buffer size; its last 8 bytes are the
 /// `le` attempt count. `on_result(gpu, payload, secs)` gets the full `OUT`
-/// bytes and decides whether it's a match.
+/// bytes and decides whether it's a match. `contexts` must already be
+/// initialized (see `init_gpu_devices`).
 #[cfg(feature = "gpu")]
 fn run_gpu_workers<const OUT: usize>(
-    num_gpus: u32,
+    contexts: Vec<GpuCtx>,
     ops: GpuOps,
-    init: impl Fn(u32) -> *mut c_void,
     done: impl Fn() -> bool,
     mut on_result: impl FnMut(usize, &[u8], f64),
     quota: u32,
 ) {
-    let contexts: Vec<*mut c_void> = (0..num_gpus).map(&init).collect();
-    let mut launch_times = vec![Instant::now(); num_gpus as usize];
-    let mut in_flight = vec![false; num_gpus as usize];
-    let push_mask = |ctx: *mut c_void| {
+    let mut launch_times = vec![Instant::now(); contexts.len()];
+    let mut in_flight = vec![false; contexts.len()];
+    let push_mask = |ctx: GpuCtx| {
         let Some(set) = ops.set_active_mask else {
             return;
         };
-        unsafe { set(ctx, unfilled_mask(quota)) };
+        unsafe { set(ctx.0, unfilled_mask(quota)) };
     };
     for &ctx in &contexts {
         push_mask(ctx);
     }
 
-    let read = |ctx: *mut c_void| -> ([u8; OUT], u64) {
+    let read = |ctx: GpuCtx| -> ([u8; OUT], u64) {
         let mut out = [0u8; OUT];
-        unsafe { (ops.read)(ctx, out.as_mut_ptr()) };
+        unsafe { (ops.read)(ctx.0, out.as_mut_ptr()) };
         let count =
             u64::from_le_bytes(array::from_fn(|j| out[OUT - 8 + j]));
         (out, count)
@@ -864,7 +891,7 @@ fn run_gpu_workers<const OUT: usize>(
     for (i, &ctx) in contexts.iter().enumerate() {
         let seed = new_gpu_seed(i as u32);
         launch_times[i] = Instant::now();
-        unsafe { (ops.launch)(ctx, seed.as_ptr()) };
+        unsafe { (ops.launch)(ctx.0, seed.as_ptr()) };
         in_flight[i] = true;
     }
 
@@ -875,7 +902,7 @@ fn run_gpu_workers<const OUT: usize>(
         let mut any_ready = false;
 
         for (i, &ctx) in contexts.iter().enumerate() {
-            if !in_flight[i] || unsafe { (ops.query)(ctx) } == 0 {
+            if !in_flight[i] || unsafe { (ops.query)(ctx.0) } == 0 {
                 continue;
             }
             any_ready = true;
@@ -890,7 +917,7 @@ fn run_gpu_workers<const OUT: usize>(
                 push_mask(ctx);
                 let seed = new_gpu_seed(i as u32);
                 launch_times[i] = Instant::now();
-                unsafe { (ops.launch)(ctx, seed.as_ptr()) };
+                unsafe { (ops.launch)(ctx.0, seed.as_ptr()) };
                 in_flight[i] = true;
             }
         }
@@ -903,13 +930,13 @@ fn run_gpu_workers<const OUT: usize>(
         if !in_flight[i] {
             continue;
         }
-        while unsafe { (ops.query)(ctx) } == 0 {
+        while unsafe { (ops.query)(ctx.0) } == 0 {
             thread::sleep(Duration::from_millis(10));
         }
         TOTAL_ATTEMPTS.fetch_add(read(ctx).1, Ordering::Relaxed);
     }
     for ctx in contexts {
-        unsafe { (ops.destroy)(ctx) };
+        unsafe { (ops.destroy)(ctx.0) };
     }
 }
 // ─── main ───────────────────────────────────────────────────────────────────
@@ -1077,27 +1104,33 @@ fn grind(mut args: GrindArgs) {
     eprintln!("{}", targets_header(target_count, max_count));
 
     let shutdown = Arc::new(AtomicBool::new(false));
-    let grind_start = Instant::now();
-    ui_start(live, grind_start);
     let spec = Arc::new(spec);
 
     #[cfg(feature = "gpu")]
     let gpu_thread = if args.num_gpus > 0 {
-        let num_gpus = args.num_gpus;
         let base = args.base;
         let owner = args.owner;
         let pairs = spec.pairs();
-        let blob = Arc::new(
+        let blob =
             fast::MatchTargets::new(&pairs, spec.case_insensitive)
-                .gpu_blob(),
-        );
+                .gpu_blob();
+        let contexts = init_gpu_devices(args.num_gpus, |id| unsafe {
+            gpu_grind_init(
+                id as i32,
+                base.as_ref().as_ptr(),
+                owner.as_ref().as_ptr(),
+                blob.as_ptr(),
+                blob.len() as u64,
+                spec.case_insensitive,
+            )
+        });
         let spec = Arc::clone(&spec);
         Some(
             thread::Builder::new()
                 .name("gpu_mgr".into())
                 .spawn(move || {
                     run_gpu_workers::<24>(
-                        num_gpus,
+                        contexts,
                         GpuOps {
                             launch: gpu_grind_launch,
                             query: gpu_grind_query,
@@ -1106,16 +1139,6 @@ fn grind(mut args: GrindArgs) {
                             set_active_mask: Some(
                                 gpu_grind_set_active_mask,
                             ),
-                        },
-                        |id| unsafe {
-                            gpu_grind_init(
-                                id as i32,
-                                base.as_ref().as_ptr(),
-                                owner.as_ref().as_ptr(),
-                                blob.as_ptr(),
-                                blob.len() as u64,
-                                spec.case_insensitive,
-                            )
                         },
                         || done(target_count),
                         |i, out, time_sec| {
@@ -1156,6 +1179,8 @@ fn grind(mut args: GrindArgs) {
         None
     };
 
+    let grind_start = Instant::now();
+    ui_start(live, grind_start);
     let reporter = spawn_ui_reporter(Arc::clone(&shutdown));
 
     (0..args.num_cpus).into_par_iter().for_each(|i| {
@@ -1261,8 +1286,6 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
     );
     eprintln!("{}", targets_header(target_count, max_count));
     let shutdown = Arc::new(AtomicBool::new(false));
-    let grind_start = Instant::now();
-    ui_start(live, grind_start);
     let match_targets = {
         let pairs = spec.pairs();
         fast::MatchTargets::new(&pairs, spec.case_insensitive)
@@ -1272,19 +1295,24 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
     #[cfg(not(feature = "gpu"))]
     let _ = spec;
 
-    let reporter = spawn_ui_reporter(Arc::clone(&shutdown));
-
     #[cfg(feature = "gpu")]
     let gpu_thread = if args.num_gpus > 0 {
-        let num_gpus = args.num_gpus;
-        let blob = Arc::new(match_targets.gpu_blob());
+        let blob = match_targets.gpu_blob();
+        let contexts = init_gpu_devices(args.num_gpus, |id| unsafe {
+            gpu_keypair_init(
+                id as i32,
+                blob.as_ptr(),
+                blob.len() as u64,
+                spec.case_insensitive,
+            )
+        });
         let spec = Arc::clone(&spec);
         Some(
             thread::Builder::new()
                 .name("gpu_mgr".into())
                 .spawn(move || {
                     run_gpu_workers::<40>(
-                        num_gpus,
+                        contexts,
                         GpuOps {
                             launch: gpu_keypair_launch,
                             query: gpu_keypair_query,
@@ -1293,14 +1321,6 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                             set_active_mask: Some(
                                 gpu_keypair_set_active_mask,
                             ),
-                        },
-                        |id| unsafe {
-                            gpu_keypair_init(
-                                id as i32,
-                                blob.as_ptr(),
-                                blob.len() as u64,
-                                spec.case_insensitive,
-                            )
                         },
                         || {
                             fast::is_done(target_count)
@@ -1342,6 +1362,10 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
     } else {
         None
     };
+
+    let grind_start = Instant::now();
+    ui_start(live, grind_start);
+    let reporter = spawn_ui_reporter(Arc::clone(&shutdown));
 
     fast::run_cpu_workers(
         &match_targets,
@@ -1410,14 +1434,16 @@ fn grind_doppler(mut args: DopplerArgs) {
 
     #[cfg(feature = "gpu")]
     let gpu_thread = if args.num_gpus > 0 {
-        let num_gpus = args.num_gpus;
         let segments = args.segments as u32;
+        let contexts = init_gpu_devices(args.num_gpus, |id| unsafe {
+            gpu_doppler_init(id as i32, segments)
+        });
         Some(
             thread::Builder::new()
                 .name("gpu_mgr".into())
                 .spawn(move || {
                     run_gpu_workers::<40>(
-                        num_gpus,
+                        contexts,
                         GpuOps {
                             launch: gpu_doppler_launch,
                             query: gpu_doppler_query,
@@ -1425,7 +1451,6 @@ fn grind_doppler(mut args: DopplerArgs) {
                             destroy: gpu_doppler_destroy,
                             set_active_mask: None,
                         },
-                        |id| unsafe { gpu_doppler_init(id as i32, segments) },
                         || done(target_count),
                         |i, out, time_sec| {
                             let found_seed: [u8; 32] =
