@@ -16,6 +16,7 @@ __constant__ uint8_t d_match_lut[58];
 #include "pattern_table.h"
 
 __constant__ uint32_t d_n_patterns;
+__constant__ unsigned long long d_active_mask = ~0ULL;
 __constant__ uint8_t d_prefix_len[VANITY_MAX_PATTERNS];
 __constant__ uint8_t d_suffix_len[VANITY_MAX_PATTERNS];
 __constant__ uint8_t d_prefix[VANITY_MAX_PATTERNS][VANITY_MAX_PATTERN_LEN];

@@ -334,6 +334,13 @@ void gpu_grind_read(void *opaque, uint8_t *out) {
     c->max_iters = adapt_iters(c->max_iters, elapsed, GRIND_ITERS_MIN, GRIND_ITERS_MAX);
 }
 
+void gpu_grind_set_active_mask(void *opaque, unsigned long long mask) {
+    GrindCtx *c = (GrindCtx *)opaque;
+    CK(clEnqueueWriteBuffer(c->queue, c->patterns, CL_TRUE,
+                            VANITY_PT_ACTIVE, sizeof(mask), &mask,
+                            0, NULL, NULL), "active mask");
+}
+
 void gpu_grind_destroy(void *opaque) {
     GrindCtx *c = (GrindCtx *)opaque;
     clFinish(c->queue);
@@ -481,6 +488,13 @@ void gpu_keypair_read(void *opaque, uint8_t *out) {
     clReleaseEvent(c->event);
     c->in_flight = 0;
     c->max_iters = adapt_iters(c->max_iters, elapsed, KP_ITERS_MIN, KP_ITERS_MAX);
+}
+
+void gpu_keypair_set_active_mask(void *opaque, unsigned long long mask) {
+    KeypairCtx *c = (KeypairCtx *)opaque;
+    CK(clEnqueueWriteBuffer(c->queue, c->patterns, CL_TRUE,
+                            VANITY_PT_ACTIVE, sizeof(mask), &mask,
+                            0, NULL, NULL), "active mask");
 }
 
 void gpu_keypair_destroy(void *opaque) {

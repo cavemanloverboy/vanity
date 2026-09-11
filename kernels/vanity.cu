@@ -277,6 +277,13 @@ extern "C" void* gpu_grind_init(
     return (void *)ctx;
 }
 
+extern "C" void gpu_grind_set_active_mask(void *opaque, unsigned long long mask)
+{
+    GpuGrindCtx *ctx = (GpuGrindCtx *)opaque;
+    cudaSetDevice(ctx->device_id);
+    cudaMemcpyToSymbol(d_active_mask, &mask, sizeof(mask));
+}
+
 template<bool MULTI>
 __global__ void vanity_search(uint8_t *buffer, uint64_t stride, unsigned long long max_cycles);
 

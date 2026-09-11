@@ -69,13 +69,14 @@ struct PatternIdx {
 /// Bytes are canonical raw_base58 indices, not ASCII.
 pub struct MatchTargets {
     patterns: Vec<PatternIdx>,
-    max_prefix_len: u8,
-    max_suffix_len: u8,
     match_lut: &'static [u8; 58],
 }
 
 impl MatchTargets {
-    pub fn new(patterns: &[(&str, &str)], case_insensitive: bool) -> Self {
+    pub fn new(
+        patterns: &[(&str, &str)],
+        case_insensitive: bool,
+    ) -> Self {
         assert!(
             patterns.len() <= MAX_PATTERNS,
             "at most {MAX_PATTERNS} patterns"
@@ -88,8 +89,6 @@ impl MatchTargets {
         let lut = match_lut(case_insensitive);
 
         let mut out = Vec::with_capacity(patterns.len());
-        let mut max_prefix_len = 0u8;
-        let mut max_suffix_len = 0u8;
         for &(prefix, suffix) in patterns {
             debug_assert!(prefix.len() <= MAX_PATTERN_LEN);
             debug_assert!(suffix.len() <= MAX_PATTERN_LEN);
@@ -101,43 +100,65 @@ impl MatchTargets {
             for (i, &b) in suffix.as_bytes().iter().enumerate() {
                 suffix_idx[i] = char_to_canonical(b, alphabet, lut);
             }
-            let plen = prefix.len() as u8;
-            let slen = suffix.len() as u8;
-            max_prefix_len = max_prefix_len.max(plen);
-            max_suffix_len = max_suffix_len.max(slen);
             out.push(PatternIdx {
                 prefix_idx,
-                prefix_len: plen,
+                prefix_len: prefix.len() as u8,
                 suffix_idx,
-                suffix_len: slen,
+                suffix_len: suffix.len() as u8,
             });
         }
 
         Self {
             patterns: out,
-            max_prefix_len,
-            max_suffix_len,
             match_lut: lut,
         }
     }
 
+    /// Bit `i` is set when pattern `i` matches. Empty set → no match.
+    #[cfg(test)]
+    pub fn match_mask(&self, bytes: &[u8; 32]) -> u64 {
+        self.match_mask_active(bytes, u64::MAX)
+    }
+
+    /// Bit `i` is set when pattern `i` matches and that kind is in `active`.
     #[inline]
-    pub fn matches(&self, bytes: &[u8; 32]) -> bool {
-        check_match_32(bytes, &self.patterns, self.match_lut)
+    pub fn match_mask_active(
+        &self,
+        bytes: &[u8; 32],
+        active: u64,
+    ) -> u64 {
+        check_match_32(bytes, &self.patterns, self.match_lut, active)
     }
 
     /// Canonical-index blob consumed by `gpu_grind_init` / `gpu_keypair_init`.
+    #[cfg(any(test, feature = "gpu"))]
     pub fn gpu_blob(&self) -> Vec<u8> {
+        let max_prefix_len = self
+            .patterns
+            .iter()
+            .map(|p| p.prefix_len)
+            .max()
+            .unwrap_or(0);
+        let max_suffix_len = self
+            .patterns
+            .iter()
+            .map(|p| p.suffix_len)
+            .max()
+            .unwrap_or(0);
         let mut v = Vec::with_capacity(
             6 + self
                 .patterns
                 .iter()
-                .map(|p| 2 + p.prefix_len as usize + p.suffix_len as usize)
+                .map(|p| {
+                    2 + p.prefix_len as usize + p.suffix_len as usize
+                })
                 .sum::<usize>(),
         );
-        v.extend_from_slice(&(self.patterns.len() as u32).to_le_bytes());
-        v.push(self.max_prefix_len);
-        v.push(self.max_suffix_len);
+        v.extend_from_slice(
+            &(self.patterns.len() as u32).to_le_bytes(),
+        );
+        v.push(max_prefix_len);
+        v.push(max_suffix_len);
         for p in &self.patterns {
             v.push(p.prefix_len);
             v.extend_from_slice(&p.prefix_idx[..p.prefix_len as usize]);
@@ -194,7 +215,8 @@ fn check_match_32(
     bytes: &[u8; 32],
     patterns: &[PatternIdx],
     match_lut: &[u8; 58],
-) -> bool {
+    active: u64,
+) -> u64 {
     let mut in_leading_0s = 0usize;
     while in_leading_0s < 32 && bytes[in_leading_0s] == 0 {
         in_leading_0s += 1;
@@ -247,12 +269,16 @@ fn check_match_32(
     let encoded_length = RAW58_SZ_32 - skip;
 
     if patterns.is_empty() {
-        return true;
+        return 1;
     }
 
     // Same per-char early-reject walk as the original single-pattern
     // matcher; extra patterns re-use already-emitted limbs.
-    for p in patterns {
+    let mut mask = 0u64;
+    for (pi, p) in patterns.iter().enumerate() {
+        if active & (1u64 << pi) == 0 {
+            continue;
+        }
         let mut ok = true;
         for i in 0..p.prefix_len as usize {
             let rb_idx = skip + i;
@@ -288,10 +314,10 @@ fn check_match_32(
             }
         }
         if ok {
-            return true;
+            mask |= 1u64 << pi;
         }
     }
-    false
+    mask
 }
 
 #[cfg(test)]
@@ -308,16 +334,16 @@ mod tests {
     ) -> bool {
         let s = fd_bs58::encode_32(*bytes);
         if ci {
-            let lc: String = s
-                .chars()
-                .map(|c| {
-                    if c == 'L' {
-                        c
-                    } else {
-                        c.to_ascii_lowercase()
-                    }
-                })
-                .collect();
+            let lc: String =
+                s.chars()
+                    .map(|c| {
+                        if c == 'L' {
+                            c
+                        } else {
+                            c.to_ascii_lowercase()
+                        }
+                    })
+                    .collect();
             (prefix.is_empty() || lc.starts_with(prefix))
                 && (suffix.is_empty() || lc.ends_with(suffix))
         } else {
@@ -334,7 +360,7 @@ mod tests {
             let seed: [u8; 32] = h[..32].try_into().unwrap();
             let bytes = pubkey_of_seed(&seed);
             assert_eq!(
-                target.matches(&bytes),
+                target.match_mask(&bytes) != 0,
                 encode_matches(&bytes, "zz", "LM", false),
                 "seed {i}"
             );
@@ -350,7 +376,7 @@ mod tests {
             let seed: [u8; 32] = h[..32].try_into().unwrap();
             let bytes = pubkey_of_seed(&seed);
             assert_eq!(
-                target.matches(&bytes),
+                target.match_mask(&bytes) != 0,
                 encode_matches(&bytes, "mithriL", "", true),
                 "seed {i}"
             );
@@ -369,7 +395,7 @@ mod tests {
             let prefix = &key[..key.len().min(3)];
             let suffix = &key[key.len().saturating_sub(2)..];
             let target = MatchTargets::new(&[(prefix, suffix)], false);
-            assert!(target.matches(&bytes), "{key}");
+            assert!(target.match_mask(&bytes) != 0, "{key}");
         }
     }
 
@@ -377,14 +403,15 @@ mod tests {
     fn or_of_two_patterns() {
         let key = "XkCriyrNwS3G4rzAXtG5B1nnvb5Ka1JtCku93VqeKAr";
         let bytes = fd_bs58::decode_32(key).unwrap();
-        let miss = MatchTargets::new(&[("zzz", ""), ("aaa", "qq")], false);
-        assert!(!miss.matches(&bytes));
+        let miss =
+            MatchTargets::new(&[("zzz", ""), ("aaa", "qq")], false);
+        assert_eq!(miss.match_mask(&bytes), 0);
         let hit =
             MatchTargets::new(&[("zzz", ""), ("XkC", "KAr")], false);
-        assert!(hit.matches(&bytes));
+        assert_eq!(hit.match_mask(&bytes), 0b10);
         let pref_only =
             MatchTargets::new(&[("nope", "nope"), ("XkC", "")], false);
-        assert!(pref_only.matches(&bytes));
+        assert_eq!(pref_only.match_mask(&bytes), 0b10);
     }
 
     #[test]

@@ -14,7 +14,9 @@
 #define VANITY_PT_SLEN   (4 + VANITY_MAX_PATTERNS)
 #define VANITY_PT_PREF   (VANITY_PT_SLEN + VANITY_MAX_PATTERNS)
 #define VANITY_PT_SUF    (VANITY_PT_PREF + VANITY_MAX_PATTERNS * VANITY_MAX_PATTERN_LEN)
-#define VANITY_PT_SIZE   (VANITY_PT_SUF + VANITY_MAX_PATTERNS * VANITY_MAX_PATTERN_LEN)
+#define VANITY_PT_SUF_END (VANITY_PT_SUF + VANITY_MAX_PATTERNS * VANITY_MAX_PATTERN_LEN)
+#define VANITY_PT_ACTIVE ((VANITY_PT_SUF_END + 7) & ~7)
+#define VANITY_PT_SIZE   (VANITY_PT_ACTIVE + 8)
 
 /* Packed blob from MatchTargets::gpu_blob → flat SoA. */
 static void vanity_unpack_patterns(const uint8_t *blob, uint64_t blob_len,
@@ -37,6 +39,8 @@ static void vanity_unpack_patterns(const uint8_t *blob, uint64_t blob_len,
         memcpy(out + VANITY_PT_SUF + i * VANITY_MAX_PATTERN_LEN, p, slen);
         p += slen;
     }
+    unsigned long long active = ~0ULL;
+    memcpy(out + VANITY_PT_ACTIVE, &active, 8);
 }
 
 #endif

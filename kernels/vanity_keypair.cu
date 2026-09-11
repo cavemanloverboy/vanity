@@ -164,6 +164,13 @@ extern "C" void* gpu_keypair_init(
     return (void *)ctx;
 }
 
+extern "C" void gpu_keypair_set_active_mask(void *opaque, unsigned long long mask)
+{
+    GpuKeypairCtx *ctx = (GpuKeypairCtx *)opaque;
+    cudaSetDevice(ctx->device_id);
+    cudaMemcpyToSymbol(d_active_mask, &mask, sizeof(mask));
+}
+
 extern "C" void gpu_keypair_launch(void *opaque, uint8_t *seed)
 {
     GpuKeypairCtx *ctx = (GpuKeypairCtx *)opaque;

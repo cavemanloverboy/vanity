@@ -16,6 +16,7 @@ extern __constant__ uint8_t d_match_lut[58];
 #endif
 
 extern __constant__ uint32_t d_n_patterns;
+extern __constant__ unsigned long long d_active_mask;
 extern __constant__ uint8_t d_prefix_len[VANITY_MAX_PATTERNS];
 extern __constant__ uint8_t d_suffix_len[VANITY_MAX_PATTERNS];
 extern __constant__ uint8_t d_prefix[VANITY_MAX_PATTERNS][VANITY_MAX_PATTERN_LEN];
@@ -189,6 +190,8 @@ static __device__ __forceinline__ bool fd_base58_check_match_any_32_words(const 
 
     for (uint32_t pi = 0; pi < n_pat; pi++)
     {
+        if ((d_active_mask & (1ULL << pi)) == 0)
+            continue;
         uint8_t plen = d_prefix_len[pi];
         uint8_t slen = d_suffix_len[pi];
 

@@ -14,6 +14,9 @@
 #define VANITY_PT_SLEN   (4 + VANITY_MAX_PATTERNS)
 #define VANITY_PT_PREF   (VANITY_PT_SLEN + VANITY_MAX_PATTERNS)
 #define VANITY_PT_SUF    (VANITY_PT_PREF + VANITY_MAX_PATTERNS * VANITY_MAX_PATTERN_LEN)
+#define VANITY_PT_SUF_END (VANITY_PT_SUF + VANITY_MAX_PATTERNS * VANITY_MAX_PATTERN_LEN)
+#define VANITY_PT_ACTIVE ((VANITY_PT_SUF_END + 7) & ~7)
+#define VANITY_PT_SIZE   (VANITY_PT_ACTIVE + 8)
 #endif
 
 __constant uchar base58_chars[]    = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
@@ -218,7 +221,13 @@ static bool fd_base58_check_match_any_32_words(const uint state[8],
     if (n_pat == 0)
         return true;
 
+    ulong active = 0UL;
+    for (uint b = 0; b < 8; b++)
+        active |= ((ulong)patterns[VANITY_PT_ACTIVE + b]) << (8 * b);
+
     for (uint pi = 0; pi < n_pat; pi++) {
+        if ((active & (1UL << pi)) == 0)
+            continue;
         uchar plen = patterns[VANITY_PT_PLEN + pi];
         uchar slen = patterns[VANITY_PT_SLEN + pi];
         ulong pref = (ulong)VANITY_PT_PREF + (ulong)pi * (ulong)VANITY_MAX_PATTERN_LEN;
