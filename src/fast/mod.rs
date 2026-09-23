@@ -1,6 +1,8 @@
 mod check_match;
 mod field;
 mod group;
+#[cfg(target_arch = "aarch64")]
+mod neon;
 pub mod sha512_simd;
 pub mod simd;
 
@@ -237,6 +239,51 @@ unsafe fn grind_thread_simd(
     TOTAL_ATTEMPTS.fetch_add(local, Ordering::Relaxed);
 }
 
+#[cfg(target_arch = "aarch64")]
+fn grind_thread_neon(
+    target: &MatchTargets,
+    min_count: u32,
+    max_count: u32,
+) {
+    check_write_permissions();
+    let mut seeds: [[u8; 32]; BATCH] = [[0u8; 32]; BATCH];
+    for s in seeds.iter_mut() {
+        *s = rand::random();
+    }
+    let mut used = [[0u8; 32]; BATCH];
+    let mut pubkeys = [[0u8; 32]; BATCH];
+    let mut local: u64 = 0;
+
+    loop {
+        if grind_done(min_count) {
+            break;
+        }
+        unsafe {
+            neon::keygen_batch(&mut seeds, &mut used, &mut pubkeys);
+        }
+        local += BATCH as u64;
+        if local >= 4096 {
+            TOTAL_ATTEMPTS.fetch_add(local, Ordering::Relaxed);
+            local = 0;
+        }
+        for j in 0..BATCH {
+            let mask = target.match_mask_active(
+                &pubkeys[j],
+                crate::unfilled_mask(max_count),
+            );
+            if mask != 0 && credit_kinds(mask, max_count) {
+                let s = fd_bs58::encode_32(pubkeys[j]);
+                crate::ui_with_match(|| {
+                    eprintln!("match: {s}");
+                    eprintln!("pubkey: {s}");
+                    save_keypair(&used[j], &pubkeys[j], &s);
+                });
+            }
+        }
+    }
+    TOTAL_ATTEMPTS.fetch_add(local, Ordering::Relaxed);
+}
+
 fn grind_thread_scalar(
     target: &MatchTargets,
     min_count: u32,
@@ -316,7 +363,9 @@ pub fn total_attempts() -> u64 {
 }
 
 pub fn backend_name() -> &'static str {
-    if simd::available() {
+    if cfg!(target_arch = "aarch64") {
+        "neon (4-lane)"
+    } else if simd::available() {
         "avx512-ifma (8-lane)"
     } else {
         "scalar"
@@ -346,7 +395,9 @@ pub fn run_cpu_workers(
                     grind_thread_scalar(target, min_count, max_count);
                 }
             }
-            #[cfg(not(target_arch = "x86_64"))]
+            #[cfg(target_arch = "aarch64")]
+            grind_thread_neon(target, min_count, max_count);
+            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
             grind_thread_scalar(target, min_count, max_count);
         });
 }

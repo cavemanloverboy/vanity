@@ -132,7 +132,7 @@ to `--max-count`). This is the classic
 "vanity wallet/mint" case: the result is a standalone keypair you can sign
 with. It's slower than `grind` because each attempt computes an ed25519 scalar
 multiplication. The CPU path uses a batched custom ed25519 implementation
-(AVX-512 IFMA when available); GPUs use the CUDA/OpenCL keypair kernels.
+(AVX-512 IFMA on x86, 4-lane NEON on Apple Silicon); GPUs use the CUDA/OpenCL/Metal keypair kernels.
 
 ```bash
 vanity grind-keypair --pattern bob...xyz --num-gpus 1
