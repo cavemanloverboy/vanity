@@ -27,6 +27,11 @@ use {
 pub struct GrindQuery {
     pub base: String,
     pub suffix: Option<String>,
+    /// Program that will own the created account. Defaults to
+    /// `VANITY_DEFAULT_TOKEN_PROGRAM`. Token-2022 mints must pass
+    /// `TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`, because the owner is
+    /// hashed into the derived address.
+    pub owner: Option<String>,
 }
 
 #[cfg(feature = "server")]
@@ -156,11 +161,13 @@ async fn root() -> Json<serde_json::Value> {
             ],
             "query_params": [
                 "base - Base pubkey for grinding (required)",
-                "suffix - Target suffix for vanity addresses (optional)"
+                "suffix - Target suffix for vanity addresses (optional)",
+                "owner - Program that will own the created account (optional; defaults to VANITY_DEFAULT_TOKEN_PROGRAM). Token-2022 mints pass TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"
             ]
         },
         "example_usage": {
             "curl": "curl -X GET 'http://localhost:8080/grind?base=3tJrAXnjofAw8oskbMaSo9oMAYuzdBgVbW3TvQLdMEBd&suffix=omni'",
+            "curl_token_2022": "curl -X GET 'http://localhost:8080/grind?base=3tJrAXnjofAw8oskbMaSo9oMAYuzdBgVbW3TvQLdMEBd&suffix=yLP&owner=TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb'",
             "description": "Returns vanity address result immediately"
         },
         "response_format": {
@@ -195,8 +202,11 @@ async fn grind_sync(
 ) -> Result<Json<GrindResult>, (StatusCode, Json<serde_json::Value>)> {
     // Get configuration from query parameters and environment variables
     let base_str = query.base;
-    let owner_str = std::env::var("VANITY_DEFAULT_TOKEN_PROGRAM")
-        .unwrap_or_else(|_| "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string());
+    let owner_from_query = query.owner.filter(|owner| !owner.trim().is_empty());
+    let owner_str = owner_from_query.clone().unwrap_or_else(|| {
+        std::env::var("VANITY_DEFAULT_TOKEN_PROGRAM")
+            .unwrap_or_else(|_| "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA".to_string())
+    });
     let prefix = std::env::var("VANITY_DEFAULT_PREFIX").ok();
     let suffix = query.suffix;
     let case_insensitive = std::env::var("VANITY_DEFAULT_CASE_INSENSITIVE")
@@ -223,6 +233,14 @@ async fn grind_sync(
 
     let owner = match parse_pubkey(&owner_str) {
         Ok(pk) => pk,
+        Err(e) if owner_from_query.is_some() => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": format!("Invalid owner pubkey in query parameter: {}", e)
+                })),
+            ));
+        }
         Err(e) => {
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,

@@ -37,7 +37,7 @@ All parameters are configured via environment variables:
 |----------|--------|-------------|
 | `/` | GET | API documentation |
 | `/health` | GET | Health check |
-| `/grind?base=<base>&suffix=<target>` | GET | Grind vanity addresses (synchronous) |
+| `/grind?base=<base>&suffix=<target>[&owner=<program>]` | GET | Grind vanity addresses (synchronous) |
 
 ### Grind Vanity Addresses
 **GET** `/grind?base=<base>&suffix=<target>`
@@ -47,6 +47,11 @@ Returns vanity address result immediately using query parameters and environment
 **Query Parameters:**
 - `base` (required): Base pubkey for grinding
 - `suffix` (optional): Target suffix for vanity addresses
+- `owner` (optional): Program that will own the account created with the
+  returned seed. Defaults to `VANITY_DEFAULT_TOKEN_PROGRAM`. The owner is part
+  of the `create_with_seed` derivation, so a Token-2022 mint must be ground
+  with `owner=TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`; a seed ground for
+  the SPL Token program derives a different address under Token-2022.
 
 **Response:**
 ```json
