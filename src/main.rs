@@ -1,5 +1,11 @@
 mod fast;
 
+#[cfg(all(feature = "metal", not(target_os = "macos")))]
+compile_error!("the metal feature requires macOS");
+
+#[cfg(all(test, feature = "metal"))]
+mod metal_kat;
+
 use clap::Parser;
 use ed25519_dalek::SigningKey;
 use num_bigint::BigUint;

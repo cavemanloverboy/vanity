@@ -17,6 +17,9 @@ gpu = ["cc"]
 # main.rs (same extern "C" ABI) but build.rs compiles the OpenCL C host and
 # kernels instead of the .cu files. Build with `--features=opencl`.
 opencl = ["gpu"]
+# Native Metal backend for Apple GPUs. macOS only. Takes precedence over
+# `opencl` and `gpu` when more than one is enabled.
+metal = ["gpu"]
 deploy = ["solana-rpc-client", "solana-sdk"]
 default = []
 

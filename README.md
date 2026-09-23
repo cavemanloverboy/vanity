@@ -30,13 +30,21 @@ If a launch prints `no kernel image is available for execution on the device`, t
 
 Keypair CUDA builds use a width-8 affine comb table by default. Wider tables do fewer additions per scalar; `VANITY_COMB_WIDTH` accepts 5 through 12 (8 is ~240M keys/s on a 4090).
 
-On machines without CUDA (AMD / Intel / Apple GPUs, or no NVIDIA driver), build the OpenCL backend instead:
+On Apple Silicon, build the native Metal backend:
+
+```bash
+cargo install vanity --features=metal
+```
+
+Metal kernels compile at runtime with the system Metal framework (macOS only). This is the fast ed25519 path on Apple GPUs.
+
+On other machines without CUDA (AMD / Intel, or no NVIDIA driver), build the OpenCL backend instead:
 
 ```bash
 cargo install vanity --features=opencl
 ```
 
-The OpenCL backend needs only an OpenCL 1.2 ICD loader and headers at build time (`-lOpenCL` on Linux, the system `OpenCL.framework` on macOS); kernels are compiled at runtime for whatever device is present. It exposes the same CLI and `--num-gpus` flag as the CUDA build. The two GPU backends are mutually exclusive — pick one feature at build time.
+The OpenCL backend needs only an OpenCL 1.2 ICD loader and headers at build time (`-lOpenCL` on Linux, the system `OpenCL.framework` on macOS); kernels are compiled at runtime for whatever device is present. It exposes the same CLI and `--num-gpus` flag as the CUDA build. The GPU backends are mutually exclusive — if more than one feature is enabled, `metal` is used, otherwise `opencl`, otherwise CUDA.
 
 If you don't have a GPU, consider using [vast.ai](https://cloud.vast.ai/?ref_id=126830). Pls use this referral link so that I can keep using GPUs.
 
@@ -214,6 +222,9 @@ Approximate single-device throughput:
 | CPU    | AMD EPYC 9275F (48 threads, AVX-512 IFMA) | ~201 M | ~33 M |
 | CUDA   | RTX 4090   | ~8.6B B | ~240 M |
 | OpenCL | Apple Silicon | ~315 M  | ~15 M  |
+| Metal  | Apple M5 Pro (20 GPU cores) | unmeasured | ~36 M |
+
+Metal keypair throughput is `grind-doppler` on this machine (`--num-gpus 1 --num-cpus 1`): about 36M keys/s, versus about 13M keys/s for the OpenCL backend on the same GPU. The kernel is a width-12 affine comb stored as 128-byte records (one cache line per table entry). `fe_mul`, `fe_sq`, and the 32-byte SHA-512 stay real calls so their temporaries do not spill the comb.
 
 `grind` is far faster because each attempt is just a SHA-256 hash. Keypair modes (`grind-keypair`/`grind-doppler`) perform full sha512 and ed25519 scalar multiplication per attempt. Throughput scales roughly linearly with `--num-gpus`.
 
