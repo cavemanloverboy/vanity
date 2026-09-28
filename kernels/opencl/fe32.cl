@@ -49,6 +49,156 @@ static void fe32_fold(fe32 h, uint r0, uint r1, uint r2, uint r3, uint r4, uint 
     h[7] = h7;
 }
 
+#ifdef FE32_KARATSUBA
+/* h = f * g (mod p) by one Karatsuba level over 128-bit halves, 48 limb
+   products: L = f0 g0, H = f1 g1 and M = (f0 + f1)(g0 + g1), then
+   f g = L + (M - L - H) 2^128 + H 2^256. Each half product runs by column as
+   in the schoolbook version; the half sums carry one bit each, whose cross
+   terms M picks up at limbs 4 and 8. Opt-in (VANITY_CL_OPTS=-DFE32_KARATSUBA):
+   on an M3 Max it measured 1-2.6% slower in the search kernel than the
+   schoolbook multiply, its extra signed additions and larger body costing
+   more than the 16 multiplies it saves. */
+__attribute__((noinline)) static void fe32_mul(fe32 h, const fe32 f, const fe32 g) {
+    FE32_LOAD(f, f);
+    FE32_LOAD(g, g);
+    ulong t = 0;
+    t += (ulong)f0 + f4; uint s0 = (uint)t; t >>= 32;
+    t += (ulong)f1 + f5; uint s1 = (uint)t; t >>= 32;
+    t += (ulong)f2 + f6; uint s2 = (uint)t; t >>= 32;
+    t += (ulong)f3 + f7; uint s3 = (uint)t; t >>= 32;
+    uint carry_f = (uint)t;
+    t = 0;
+    t += (ulong)g0 + g4; uint u0 = (uint)t; t >>= 32;
+    t += (ulong)g1 + g5; uint u1 = (uint)t; t >>= 32;
+    t += (ulong)g2 + g6; uint u2 = (uint)t; t >>= 32;
+    t += (ulong)g3 + g7; uint u3 = (uint)t; t >>= 32;
+    uint carry_g = (uint)t;
+    uint mask_f = 0u - carry_f, mask_g = 0u - carry_g;
+    ulong c, high, next_high, low;
+    c = 0; high = 0;
+    low = 0; next_high = 0;
+    FE32_MAC(f0, g0, low, next_high)
+    c += low + high; uint L0 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(f0, g1, low, next_high)
+    FE32_MAC(f1, g0, low, next_high)
+    c += low + high; uint L1 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(f0, g2, low, next_high)
+    FE32_MAC(f1, g1, low, next_high)
+    FE32_MAC(f2, g0, low, next_high)
+    c += low + high; uint L2 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(f0, g3, low, next_high)
+    FE32_MAC(f1, g2, low, next_high)
+    FE32_MAC(f2, g1, low, next_high)
+    FE32_MAC(f3, g0, low, next_high)
+    c += low + high; uint L3 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(f1, g3, low, next_high)
+    FE32_MAC(f2, g2, low, next_high)
+    FE32_MAC(f3, g1, low, next_high)
+    c += low + high; uint L4 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(f2, g3, low, next_high)
+    FE32_MAC(f3, g2, low, next_high)
+    c += low + high; uint L5 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(f3, g3, low, next_high)
+    c += low + high; uint L6 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    c += low + high; uint L7 = (uint)c; c >>= 32; high = next_high;
+    c = 0; high = 0;
+    low = 0; next_high = 0;
+    FE32_MAC(f4, g4, low, next_high)
+    c += low + high; uint H0 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(f4, g5, low, next_high)
+    FE32_MAC(f5, g4, low, next_high)
+    c += low + high; uint H1 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(f4, g6, low, next_high)
+    FE32_MAC(f5, g5, low, next_high)
+    FE32_MAC(f6, g4, low, next_high)
+    c += low + high; uint H2 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(f4, g7, low, next_high)
+    FE32_MAC(f5, g6, low, next_high)
+    FE32_MAC(f6, g5, low, next_high)
+    FE32_MAC(f7, g4, low, next_high)
+    c += low + high; uint H3 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(f5, g7, low, next_high)
+    FE32_MAC(f6, g6, low, next_high)
+    FE32_MAC(f7, g5, low, next_high)
+    c += low + high; uint H4 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(f6, g7, low, next_high)
+    FE32_MAC(f7, g6, low, next_high)
+    c += low + high; uint H5 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(f7, g7, low, next_high)
+    c += low + high; uint H6 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    c += low + high; uint H7 = (uint)c; c >>= 32; high = next_high;
+    c = 0; high = 0;
+    low = 0; next_high = 0;
+    FE32_MAC(s0, u0, low, next_high)
+    c += low + high; uint M0 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(s0, u1, low, next_high)
+    FE32_MAC(s1, u0, low, next_high)
+    c += low + high; uint M1 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(s0, u2, low, next_high)
+    FE32_MAC(s1, u1, low, next_high)
+    FE32_MAC(s2, u0, low, next_high)
+    c += low + high; uint M2 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(s0, u3, low, next_high)
+    FE32_MAC(s1, u2, low, next_high)
+    FE32_MAC(s2, u1, low, next_high)
+    FE32_MAC(s3, u0, low, next_high)
+    c += low + high; uint M3 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(s1, u3, low, next_high)
+    FE32_MAC(s2, u2, low, next_high)
+    FE32_MAC(s3, u1, low, next_high)
+    low += (ulong)(u0 & mask_f) + (s0 & mask_g);
+    c += low + high; uint M4 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(s2, u3, low, next_high)
+    FE32_MAC(s3, u2, low, next_high)
+    low += (ulong)(u1 & mask_f) + (s1 & mask_g);
+    c += low + high; uint M5 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    FE32_MAC(s3, u3, low, next_high)
+    low += (ulong)(u2 & mask_f) + (s2 & mask_g);
+    c += low + high; uint M6 = (uint)c; c >>= 32; high = next_high;
+    low = 0; next_high = 0;
+    low += (ulong)(u3 & mask_f) + (s3 & mask_g);
+    c += low + high; uint M7 = (uint)c; c >>= 32; high = next_high;
+    c += carry_f & carry_g; uint M8 = (uint)c;
+    long d = 0;
+    d += (long)L0; uint r0 = (uint)d; d >>= 32;
+    d += (long)L1; uint r1 = (uint)d; d >>= 32;
+    d += (long)L2; uint r2 = (uint)d; d >>= 32;
+    d += (long)L3; uint r3 = (uint)d; d >>= 32;
+    d += (long)L4 + (long)M0 - (long)L0 - (long)H0; uint r4 = (uint)d; d >>= 32;
+    d += (long)L5 + (long)M1 - (long)L1 - (long)H1; uint r5 = (uint)d; d >>= 32;
+    d += (long)L6 + (long)M2 - (long)L2 - (long)H2; uint r6 = (uint)d; d >>= 32;
+    d += (long)L7 + (long)M3 - (long)L3 - (long)H3; uint r7 = (uint)d; d >>= 32;
+    d += (long)H0 + (long)M4 - (long)L4 - (long)H4; uint r8 = (uint)d; d >>= 32;
+    d += (long)H1 + (long)M5 - (long)L5 - (long)H5; uint r9 = (uint)d; d >>= 32;
+    d += (long)H2 + (long)M6 - (long)L6 - (long)H6; uint r10 = (uint)d; d >>= 32;
+    d += (long)H3 + (long)M7 - (long)L7 - (long)H7; uint r11 = (uint)d; d >>= 32;
+    d += (long)H4 + (long)M8; uint r12 = (uint)d; d >>= 32;
+    d += (long)H5; uint r13 = (uint)d; d >>= 32;
+    d += (long)H6; uint r14 = (uint)d; d >>= 32;
+    d += (long)H7; uint r15 = (uint)d; d >>= 32;
+    fe32_fold(h, r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15);
+}
+#else
 /* h = f * g (mod p), schoolbook over 64 limb products, one output column at
    a time: column k sums the low halves of products f_i g_j with i + j = k
    and the high halves of those with i + j = k - 1. Working by column keeps
@@ -155,6 +305,7 @@ __attribute__((noinline)) static void fe32_mul(fe32 h, const fe32 f, const fe32 
     c += high; uint r15 = (uint)c;
     fe32_fold(h, r0, r1, r2, r3, r4, r5, r6, r7, r8, r9, r10, r11, r12, r13, r14, r15);
 }
+#endif
 
 /* h = f^2 (mod p) by column as in fe32_mul: each column's cross products
    f_i f_j (i < j) are summed once and doubled, then the square term of an
