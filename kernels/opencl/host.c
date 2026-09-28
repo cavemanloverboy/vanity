@@ -675,6 +675,13 @@ void *gpu_keypair_init(int id, uint8_t *patterns, uint64_t patterns_len,
     }
 
     c->local  = clamp_local(dev, env_uint("VANITY_KP_LOCAL", KP_LOCAL));
+    if (c->apple) {
+        /* fe32_group_invert needs a power-of-two group the kernel can run. */
+        size_t kernel_max = 0;
+        clGetKernelWorkGroupInfo(c->kernel, dev, CL_KERNEL_WORK_GROUP_SIZE, sizeof kernel_max, &kernel_max, NULL);
+        if (kernel_max && c->local > kernel_max) c->local = kernel_max;
+        while (c->local & (c->local - 1)) c->local &= c->local - 1;
+    }
     c->global = (size_t)compute_units(dev) * env_uint("VANITY_KP_WAVES", KP_WAVES) * c->local;
     c->max_iters = KP_ITERS_INIT;
     c->counts_host = (uint32_t *)malloc(c->global * sizeof(uint32_t));
@@ -742,6 +749,7 @@ void *gpu_keypair_init(int id, uint8_t *patterns, uint64_t patterns_len,
         c->ranges = buf_copy(c->context, (size_t)c->range_count * 16, ranges);
         CK(clSetKernelArg(c->kernel, 8, sizeof(cl_mem), &c->ranges), "arg ranges");
         CK(clSetKernelArg(c->kernel, 9, sizeof(cl_uint), &c->range_count), "arg range_count");
+        CK(clSetKernelArg(c->kernel, 10, 2 * c->local * 32, NULL), "arg tree");
         if (c->info) fprintf(stderr, "\nclinfo: prefix pre-filter ranges=%u\n", c->range_count);
     }
 

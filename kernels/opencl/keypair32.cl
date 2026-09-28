@@ -11,10 +11,12 @@
    the host derives from the patterns, which rejects nearly every key without
    computing x or the base58 digits.
 
-   Keys are processed in batches of KP32_BATCH with one Montgomery inversion
-   per batch. A batch keeps only its first seed; a match re-walks the chain to
-   its own seed, which is rare enough to cost nothing and saves 32 bytes of
-   per-work-item memory per batch slot. */
+   Keys are processed in batches of KP32_BATCH, and one field inversion covers
+   the batches of the whole work-group: each work-item multiplies its batch's
+   Z values together and fe32_group_invert inverts all the products at once,
+   so the group runs its batches in lockstep. A batch keeps only its first
+   seed; a match re-walks the chain to its own seed, which is rare enough to
+   cost nothing and saves 32 bytes of per-work-item memory per batch slot. */
 
 /* The number of patterns in the table. */
 static uint pattern_count(__constant const uchar *patterns) {
@@ -60,7 +62,8 @@ __kernel void vanity_keypair_search32(
     __global const ge32_precomp *comb,   /* COMB32_TABLE_LEN entries */
     uint max_iters,
     __global const ulong *ranges,        /* range_count [start, end] pairs */
-    uint range_count)
+    uint range_count,
+    __local uint *tree)                  /* 2 * group size fe32, for fe32_group_invert */
 {
     ulong idx = get_global_id(0);
     uint n_pat = pattern_count(patterns);
@@ -88,9 +91,14 @@ __kernel void vanity_keypair_search32(
         cuda_sha256_final(&sha, seed);
     }
 
+    /* The group decides together whether to run another batch, because every
+       work-item must reach fe32_group_invert's barriers equally often. */
+    __local int stop;
     uint iter = 0;
-    while (iter < max_iters) {
-        if (atomic_max(done, 0) == 1) break;
+    for (;;) {
+        if (get_local_id(0) == 0) stop = iter >= max_iters || atomic_max(done, 0) == 1;
+        barrier(CLK_LOCAL_MEM_FENCE);
+        if (stop) break;
 
         int n = KP32_BATCH;
         if ((uint)n > max_iters - iter) n = (int)(max_iters - iter);
@@ -108,9 +116,11 @@ __kernel void vanity_keypair_search32(
             for (int i = 0; i < 32; i++) seed[i] = privatek[32 + i];
         }
 
-        fe32_batch_invert(Zs, n);
+        fe32 prefix_products[KP32_BATCH], total;
+        fe32_batch_prefix(prefix_products, total, Zs, n);
+        fe32_group_invert(total, tree);
+        fe32_batch_finish(Zs, prefix_products, total, n);
 
-        int matched = -1;
         for (int j = 0; j < n; j++) {
             fe32 y;
             ge32_affine_y(y, Ys[j], Zs[j]);
@@ -124,14 +134,8 @@ __kernel void vanity_keypair_search32(
                     walk_chain(batch_start, j);
                     for (int i = 0; i < 32; i++) out[i] = batch_start[i];
                 }
-                matched = j;
                 break;
             }
-        }
-
-        if (matched >= 0) {
-            iter += (uint)(matched + 1);
-            break;
         }
         iter += (uint)n;
     }

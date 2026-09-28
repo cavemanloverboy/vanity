@@ -446,3 +446,57 @@ static void fe32_batch_invert(fe32 zs[KP32_BATCH], int n) {
     fe32_batch_finish(zs, prefix, total, n);
 }
 
+/* Copy a field element into local memory. */
+static void fe32_to_local(__local uint *dst, const fe32 f) {
+    for (int k = 0; k < 8; k++) dst[k] = f[k];
+}
+
+/* Copy a field element out of local memory. */
+static void fe32_from_local(fe32 h, __local const uint *src) {
+    for (int k = 0; k < 8; k++) h[k] = src[k];
+}
+
+/* value <- 1/value for every work-item of the group with one field inversion
+   for all of them: a product tree over the group in `tree` (local memory for
+   2 * get_local_size(0) elements, heap-ordered with leaves from index size),
+   work-item 0 inverting the root, and the tree walked back down, each node
+   handing its children the inverse times the sibling. Every work-item of the
+   group must call it, and the group size must be a power of two. */
+static void fe32_group_invert(fe32 value, __local uint *tree) {
+    uint lid = get_local_id(0);
+    uint size = get_local_size(0);
+    fe32 left, right, node;
+    fe32_to_local(tree + 8 * (size + lid), value);
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (uint span = size >> 1; span >= 1; span >>= 1) {
+        if (lid < span) {
+            uint i = span + lid;
+            fe32_from_local(left, tree + 8 * (2 * i));
+            fe32_from_local(right, tree + 8 * (2 * i + 1));
+            fe32_mul(node, left, right);
+            fe32_to_local(tree + 8 * i, node);
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (lid == 0) {
+        fe32_from_local(node, tree + 8);
+        fe32_invert(node, node);
+        fe32_to_local(tree + 8, node);
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (uint span = 1; span < size; span <<= 1) {
+        if (lid < span) {
+            uint i = span + lid;
+            fe32_from_local(node, tree + 8 * i);
+            fe32_from_local(left, tree + 8 * (2 * i));
+            fe32_from_local(right, tree + 8 * (2 * i + 1));
+            fe32 inverse;
+            fe32_mul(inverse, node, right);
+            fe32_to_local(tree + 8 * (2 * i), inverse);
+            fe32_mul(inverse, node, left);
+            fe32_to_local(tree + 8 * (2 * i + 1), inverse);
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    fe32_from_local(value, tree + 8 * (size + lid));
+}
