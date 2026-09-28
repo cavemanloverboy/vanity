@@ -7,6 +7,9 @@
    -> clamp -> signed comb scalarmult (ge32.cl) -> batch compress -> base58
    match against the pattern table, with the same single-pattern and
    any-pattern matchers. The next seed is the high half of the SHA-512 output.
+   Before base58, a key's top 64 bits are checked against the prefix ranges
+   the host derives from the patterns, which rejects nearly every key without
+   computing x or the base58 digits.
 
    Keys are processed in batches of KP32_BATCH with one Montgomery inversion
    per batch. A batch keeps only its first seed; a match re-walks the chain to
@@ -17,6 +20,21 @@
 static uint pattern_count(__constant const uchar *patterns) {
     return (uint)patterns[0] | ((uint)patterns[1] << 8)
          | ((uint)patterns[2] << 16) | ((uint)patterns[3] << 24);
+}
+
+/* Whether a key whose big-endian view starts with words w0, w1 can match a
+   pattern: its top 64 bits lie in one of the host's sorted, disjoint prefix
+   ranges (build_prefix_ranges in host.c). With no ranges every key can. */
+static bool in_prefix_ranges(uint w0, uint w1, __global const ulong *ranges, uint count) {
+    if (count == 0) return true;
+    ulong v = ((ulong)w0 << 32) | w1;
+    uint lo = 0, hi = count;
+    while (lo < hi) {
+        uint mid = (lo + hi) >> 1;
+        if (ranges[2 * mid] <= v) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo > 0 && v <= ranges[2 * (lo - 1) + 1];
 }
 
 /* Whether an encoded key, as the eight big-endian words of its 32 bytes,
@@ -40,7 +58,9 @@ __kernel void vanity_keypair_search32(
     __global volatile int *done,
     __global uint *counts,
     __global const ge32_precomp *comb,   /* COMB32_TABLE_LEN entries */
-    uint max_iters)
+    uint max_iters,
+    __global const ulong *ranges,        /* range_count [start, end] pairs */
+    uint range_count)
 {
     ulong idx = get_global_id(0);
     uint n_pat = pattern_count(patterns);
@@ -94,6 +114,7 @@ __kernel void vanity_keypair_search32(
         for (int j = 0; j < n; j++) {
             fe32 y;
             ge32_affine_y(y, Ys[j], Zs[j]);
+            if (!in_prefix_ranges(bswap32(y[0]), bswap32(y[1]), ranges, range_count)) continue;
             ge32_encode_sign(y, Xs[j], Zs[j]);
             uint pubkey_words[8];
             for (int k = 0; k < 8; k++) pubkey_words[k] = bswap32(y[k]);
@@ -145,11 +166,12 @@ __kernel void pubkeys_from_seeds32(__global const uchar *seeds,
 }
 
 /* Self-test: whether each of `count` arbitrary 32-byte keys passes the
-   search's matcher. */
+   search's matcher, pre-filter and then base58. */
 __kernel void match_keys32(__global const uchar *keys,
                            __global uchar *flags,
                            __constant const uchar *match_lut,
                            __constant const uchar *patterns,
+                           __global const ulong *ranges, uint range_count,
                            uint count)
 {
     uint idx = get_global_id(0);
@@ -159,5 +181,6 @@ __kernel void match_keys32(__global const uchar *keys,
         __global const uchar *b = keys + idx * 32 + 4 * k;
         words[k] = ((uint)b[0] << 24) | ((uint)b[1] << 16) | ((uint)b[2] << 8) | (uint)b[3];
     }
-    flags[idx] = matches_patterns(words, patterns, match_lut, pattern_count(patterns));
+    flags[idx] = in_prefix_ranges(words[0], words[1], ranges, range_count)
+              && matches_patterns(words, patterns, match_lut, pattern_count(patterns));
 }

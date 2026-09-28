@@ -398,6 +398,163 @@ void gpu_grind_destroy(void *opaque) {
     free(c);
 }
 
+/* ─── base58 prefix pre-filter (Apple path) ────────────────────────────── */
+
+/* An unsigned integer below 2^320 as ten little-endian 32-bit limbs: room for
+   58^44, the largest bound a 32-byte key's base58 length needs. */
+typedef struct { uint32_t limb[10]; } Big;
+
+/* a = v. */
+static void big_set(Big *a, uint64_t v) {
+    memset(a, 0, sizeof *a);
+    a->limb[0] = (uint32_t)v;
+    a->limb[1] = (uint32_t)(v >> 32);
+}
+
+/* a = a * m. */
+static void big_mul_small(Big *a, uint32_t m) {
+    uint64_t c = 0;
+    for (int k = 0; k < 10; k++) {
+        c += (uint64_t)a->limb[k] * m;
+        a->limb[k] = (uint32_t)c;
+        c >>= 32;
+    }
+}
+
+/* a = a - 1, for a > 0. */
+static void big_decrement(Big *a) {
+    for (int k = 0; k < 10; k++) {
+        if (a->limb[k] != 0) { a->limb[k]--; return; }
+        a->limb[k] = 0xffffffffu;
+    }
+}
+
+/* Negative, zero or positive as a is below, equal to or above b. */
+static int big_cmp(const Big *a, const Big *b) {
+    for (int k = 9; k >= 0; k--)
+        if (a->limb[k] != b->limb[k]) return a->limb[k] < b->limb[k] ? -1 : 1;
+    return 0;
+}
+
+/* a = 2^bits, for bits < 320. */
+static void big_pow2(Big *a, unsigned bits) {
+    memset(a, 0, sizeof *a);
+    a->limb[bits / 32] = 1u << (bits % 32);
+}
+
+/* a = v * 58^e. */
+static void big_times_pow58(Big *a, uint64_t v, unsigned e) {
+    big_set(a, v);
+    while (e--) big_mul_small(a, 58);
+}
+
+/* Bits 192..255 of a value below 2^256: the top 64 bits of a key read as a
+   big-endian number, which is what the kernel compares against the ranges. */
+static uint64_t big_top64(const Big *a) {
+    return ((uint64_t)a->limb[7] << 32) | a->limb[6];
+}
+
+#define PREFILTER_MAX_CHARS     10u
+#define PREFILTER_MAX_SPELLINGS 256u
+#define PREFILTER_MAX_RANGES    (2u * PREFILTER_MAX_SPELLINGS)
+
+/* Fill `ranges` with sorted, disjoint [start, end] pairs over the top 64 bits
+   of every 32-byte key whose base58 form starts with some pattern's prefix,
+   in any spelling the match LUT folds together, and return how many. A key
+   outside every range matches no pattern; a key inside one still takes the
+   full base58 check, so ranges only ever need to over-cover, which also keeps
+   them right as patterns drop out of the active mask. Each pattern's ranges
+   come from the longest leading part of its prefix (at most
+   PREFILTER_MAX_CHARS characters) with at most its share of
+   PREFILTER_MAX_SPELLINGS spellings, over the two lengths a key without
+   leading zero bytes encodes to, 43 and 44 characters. Returns 0, meaning no
+   filter, when any pattern has no prefix or one that may start with '1',
+   whose keys begin with a zero byte instead. */
+static uint32_t build_prefix_ranges(const uint8_t *ptable, const uint8_t match_lut[58],
+                                    uint64_t *ranges) {
+    uint32_t n_pat = 0;
+    memcpy(&n_pat, ptable + VANITY_PT_N, 4);
+    if (n_pat == 0) return 0;
+    uint64_t budget = PREFILTER_MAX_SPELLINGS / n_pat;
+    if (budget == 0) budget = 1;
+
+    Big no_leading_zero, below_2_256;
+    big_pow2(&no_leading_zero, 248);
+    big_pow2(&below_2_256, 256);
+    big_decrement(&below_2_256);
+
+    uint32_t count = 0;
+    for (uint32_t p = 0; p < n_pat; p++) {
+        uint8_t prefix_len = ptable[VANITY_PT_PLEN + p];
+        const uint8_t *prefix_idx = ptable + VANITY_PT_PREF + p * VANITY_MAX_PATTERN_LEN;
+        uint8_t alternatives[PREFILTER_MAX_CHARS][58];
+        unsigned alternative_count[PREFILTER_MAX_CHARS];
+        unsigned used = 0;
+        uint64_t spellings = 1;
+        while (used < prefix_len && used < PREFILTER_MAX_CHARS) {
+            unsigned n = 0;
+            for (int digit = 0; digit < 58; digit++)
+                if (match_lut[digit] == prefix_idx[used]) alternatives[used][n++] = (uint8_t)digit;
+            if (n == 0 || spellings * n > budget) break;
+            alternative_count[used] = n;
+            spellings *= n;
+            used++;
+        }
+        if (used == 0) return 0;
+        for (unsigned a = 0; a < alternative_count[0]; a++)
+            if (alternatives[0][a] == 0) return 0;
+
+        for (uint64_t spelling = 0; spelling < spellings; spelling++) {
+            uint64_t value = 0, rest = spelling;
+            for (unsigned i = 0; i < used; i++) {
+                value = value * 58 + alternatives[i][rest % alternative_count[i]];
+                rest /= alternative_count[i];
+            }
+            for (unsigned length = 43; length <= 44; length++) {
+                Big start, end, bound;
+                big_times_pow58(&start, value, length - used);
+                big_times_pow58(&end, value + 1, length - used);
+                big_decrement(&end);
+                big_times_pow58(&bound, 1, length - 1);
+                if (big_cmp(&start, &bound) < 0) start = bound;
+                if (big_cmp(&start, &no_leading_zero) < 0) start = no_leading_zero;
+                big_times_pow58(&bound, 1, length);
+                big_decrement(&bound);
+                if (big_cmp(&end, &bound) > 0) end = bound;
+                if (big_cmp(&end, &below_2_256) > 0) end = below_2_256;
+                if (big_cmp(&start, &end) > 0) continue;
+                ranges[2 * count] = big_top64(&start);
+                ranges[2 * count + 1] = big_top64(&end);
+                count++;
+            }
+        }
+    }
+
+    for (uint32_t i = 1; i < count; i++) {
+        uint64_t s = ranges[2 * i], e = ranges[2 * i + 1];
+        uint32_t j = i;
+        for (; j > 0 && ranges[2 * (j - 1)] > s; j--) {
+            ranges[2 * j] = ranges[2 * (j - 1)];
+            ranges[2 * j + 1] = ranges[2 * (j - 1) + 1];
+        }
+        ranges[2 * j] = s;
+        ranges[2 * j + 1] = e;
+    }
+    uint32_t merged = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (merged > 0 && ranges[2 * (merged - 1) + 1] == UINT64_MAX) continue;
+        if (merged > 0 && ranges[2 * i] <= ranges[2 * (merged - 1) + 1] + 1) {
+            if (ranges[2 * i + 1] > ranges[2 * (merged - 1) + 1])
+                ranges[2 * (merged - 1) + 1] = ranges[2 * i + 1];
+            continue;
+        }
+        ranges[2 * merged] = ranges[2 * i];
+        ranges[2 * merged + 1] = ranges[2 * i + 1];
+        merged++;
+    }
+    return merged;
+}
+
 /* ─── keypair context ────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -405,7 +562,8 @@ typedef struct {
     cl_command_queue queue;
     cl_program       program;
     cl_kernel        kernel;
-    cl_mem  seed, mlut, patterns, out, done, counts, comb;
+    cl_mem  seed, mlut, patterns, out, done, counts, comb, ranges;
+    uint32_t range_count;
     size_t  local, global;
     uint32_t max_iters;
     cl_event event;
@@ -577,6 +735,15 @@ void *gpu_keypair_init(int id, uint8_t *patterns, uint64_t patterns_len,
     CK(clSetKernelArg(c->kernel, 4, sizeof(cl_mem), &c->done), "arg done");
     CK(clSetKernelArg(c->kernel, 5, sizeof(cl_mem), &c->counts), "arg counts");
     CK(clSetKernelArg(c->kernel, 6, sizeof(cl_mem), &c->comb), "arg comb");
+    if (c->apple) {
+        uint64_t ranges[2 * PREFILTER_MAX_RANGES];
+        c->range_count = env_uint("VANITY_NO_PREFILTER", 0)
+                       ? 0 : build_prefix_ranges(ptable, match_lut, ranges);
+        c->ranges = buf_copy(c->context, (size_t)c->range_count * 16, ranges);
+        CK(clSetKernelArg(c->kernel, 8, sizeof(cl_mem), &c->ranges), "arg ranges");
+        CK(clSetKernelArg(c->kernel, 9, sizeof(cl_uint), &c->range_count), "arg range_count");
+        if (c->info) fprintf(stderr, "\nclinfo: prefix pre-filter ranges=%u\n", c->range_count);
+    }
 
     return c;
 }
@@ -660,6 +827,7 @@ void gpu_keypair_destroy(void *opaque) {
     clFinish(c->queue);
     if (c->in_flight) clReleaseEvent(c->event);
     cl_mem bufs[] = {c->seed,c->mlut,c->patterns,c->out,c->done,c->counts,c->comb};
+    if (c->ranges) clReleaseMemObject(c->ranges);
     for (size_t i = 0; i < sizeof bufs / sizeof bufs[0]; ++i) clReleaseMemObject(bufs[i]);
     clReleaseKernel(c->kernel);
     clReleaseProgram(c->program);
@@ -711,7 +879,13 @@ void gpu_keypair_match(void *opaque, const uint8_t *keys, uint64_t count, uint8_
     CK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &output), "arg flags");
     CK(clSetKernelArg(kernel, 2, sizeof(cl_mem), &c->mlut), "arg mlut");
     CK(clSetKernelArg(kernel, 3, sizeof(cl_mem), &c->patterns), "arg patterns");
-    CK(clSetKernelArg(kernel, 4, sizeof(cl_uint), &n), "arg count");
+    cl_uint count_arg = 4;
+    if (c->apple) {
+        CK(clSetKernelArg(kernel, 4, sizeof(cl_mem), &c->ranges), "arg ranges");
+        CK(clSetKernelArg(kernel, 5, sizeof(cl_uint), &c->range_count), "arg range_count");
+        count_arg = 6;
+    }
+    CK(clSetKernelArg(kernel, count_arg, sizeof(cl_uint), &n), "arg count");
     size_t global = (size_t)count;
     CK(clEnqueueNDRangeKernel(c->queue, kernel, 1, NULL, &global, NULL, 0, NULL, NULL),
        "enqueue match_keys");
