@@ -922,7 +922,9 @@ fn run_gpu_workers<const OUT: usize>(
             }
         }
         if !any_ready {
-            thread::sleep(Duration::from_millis(10));
+            // Launches last ~0.4 s; a 10 ms poll left the GPU idle ~2% of
+            // the time between them, a 1 ms poll well under 0.5%.
+            thread::sleep(Duration::from_millis(1));
         }
     }
 
