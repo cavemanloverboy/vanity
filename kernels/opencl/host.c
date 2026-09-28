@@ -15,6 +15,7 @@
 
 #ifdef __APPLE__
 #include <OpenCL/opencl.h>
+#include <mach/mach_time.h>
 #else
 #include <CL/cl.h>
 #endif
@@ -73,6 +74,36 @@ static double now_sec(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
+/* Tuning override: the VANITY_<name> environment variable if set, else the default. */
+static unsigned env_uint(const char *name, unsigned fallback) {
+    const char *v = getenv(name);
+    return (v && *v) ? (unsigned)strtoul(v, NULL, 10) : fallback;
+}
+
+/* Tuning override for a floating-point knob; see env_uint. */
+static double env_double(const char *name, double fallback) {
+    const char *v = getenv(name);
+    return (v && *v) ? strtod(v, NULL) : fallback;
+}
+
+/* Whether VANITY_CL_INFO asks for device and per-launch throughput logging. */
+static int cl_info_enabled(void) {
+    const char *v = getenv("VANITY_CL_INFO");
+    return v && *v && *v != '0';
+}
+
+/* Nanoseconds per OpenCL profiling tick. Apple reports profiling timestamps
+   in Mach ticks (41.67 ns on Apple Silicon) rather than nanoseconds. */
+static double profiling_tick_ns(void) {
+#ifdef __APPLE__
+    mach_timebase_info_data_t timebase;
+    mach_timebase_info(&timebase);
+    return (double)timebase.numer / (double)timebase.denom;
+#else
+    return 1.0;
+#endif
+}
+
 /* ─── OpenCL plumbing ────────────────────────────────────────────────────── */
 
 static void cl_die(const char *what, cl_int err) {
@@ -124,7 +155,10 @@ static cl_program build_program(cl_context ctx, cl_device_id dev,
     /* CL1.2: `fe` array parameters stay __private, matching struct fields
        of private ge_* values. Newer clang defaults to CL2+/generic AS and
        then rejects `fe_add(r->X, …)` (generic vs private). */
-    err = clBuildProgram(prog, 1, &dev, "-cl-std=CL1.2", NULL, NULL);
+    char options[512];
+    const char *extra = getenv("VANITY_CL_OPTS");
+    snprintf(options, sizeof options, "-cl-std=CL1.2 %s", extra ? extra : "");
+    err = clBuildProgram(prog, 1, &dev, options, NULL, NULL);
     if (err != CL_SUCCESS) {
         size_t log_sz = 0;
         clGetProgramBuildInfo(prog, dev, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_sz);
@@ -161,7 +195,7 @@ static cl_mem buf_copy(cl_context ctx, size_t sz, const void *host) {
 /* Grow/shrink max_iters toward TARGET_LAUNCH_SEC based on last launch time. */
 static uint32_t adapt_iters(uint32_t cur, double elapsed, uint32_t lo, uint32_t hi) {
     if (elapsed <= 1e-6) return hi;
-    double factor = TARGET_LAUNCH_SEC / elapsed;
+    double factor = env_double("VANITY_TARGET_SEC", TARGET_LAUNCH_SEC) / elapsed;
     if (factor < 0.25) factor = 0.25;
     if (factor > 4.0)  factor = 4.0;
     double next = (double)cur * factor;
@@ -369,6 +403,11 @@ typedef struct {
     int      in_flight;
     double   launch_time;
     uint32_t *counts_host;
+    int      info;
+    uint32_t launches;
+    uint64_t measured_attempts;
+    double   measured_kernel_sec;
+    double   measure_start;
 } KeypairCtx;
 
 /* ge_niels = 4 fe × 10 × 4 bytes; must match OpenCL layout. */
@@ -382,9 +421,11 @@ void *gpu_keypair_init(int id, uint8_t *patterns, uint64_t patterns_len,
     cl_int err;
 
     KeypairCtx *c = (KeypairCtx *)calloc(1, sizeof(KeypairCtx));
+    c->info = cl_info_enabled();
     c->context = clCreateContext(NULL, 1, &dev, NULL, NULL, &err);
     CK(err, "clCreateContext");
-    c->queue = clCreateCommandQueue(c->context, dev, 0, &err);
+    c->queue = clCreateCommandQueue(c->context, dev,
+                                    c->info ? CL_QUEUE_PROFILING_ENABLE : 0, &err);
     CK(err, "clCreateCommandQueue");
 
     const char *srcs[] = { CL_PREAMBLE, CL_SHA256, CL_SHA512, CL_FE, CL_PRECOMP, CL_GE, CL_BASE58, CL_KEYPAIR };
@@ -392,10 +433,19 @@ void *gpu_keypair_init(int id, uint8_t *patterns, uint64_t patterns_len,
     c->kernel = clCreateKernel(c->program, "vanity_keypair_search", &err);
     CK(err, "clCreateKernel(vanity_keypair_search)");
 
-    c->local  = clamp_local(dev, KP_LOCAL);
-    c->global = (size_t)compute_units(dev) * KP_WAVES * c->local;
+    c->local  = clamp_local(dev, env_uint("VANITY_KP_LOCAL", KP_LOCAL));
+    c->global = (size_t)compute_units(dev) * env_uint("VANITY_KP_WAVES", KP_WAVES) * c->local;
     c->max_iters = KP_ITERS_INIT;
     c->counts_host = (uint32_t *)malloc(c->global * sizeof(uint32_t));
+    if (c->info) {
+        char name[128] = {0}, vendor[128] = {0};
+        size_t kernel_wg = 0;
+        clGetDeviceInfo(dev, CL_DEVICE_NAME, sizeof name - 1, name, NULL);
+        clGetDeviceInfo(dev, CL_DEVICE_VENDOR, sizeof vendor - 1, vendor, NULL);
+        clGetKernelWorkGroupInfo(c->kernel, dev, CL_KERNEL_WORK_GROUP_SIZE, sizeof kernel_wg, &kernel_wg, NULL);
+        fprintf(stderr, "\nclinfo: device=%s vendor=%s compute_units=%u local=%zu global=%zu kernel_max_wg=%zu\n",
+                name, vendor, compute_units(dev), c->local, c->global, kernel_wg);
+    }
 
     /* Canonical base58 match indices + LUT (same scheme as gpu_grind_init /
        CUDA gpu_keypair_init). Case folding lives in the LUT / indices. */
@@ -484,6 +534,27 @@ void gpu_keypair_read(void *opaque, uint8_t *out) {
     uint64_t total = 0;
     for (size_t i = 0; i < c->global; ++i) total += c->counts_host[i];
     memcpy(out + 32, &total, 8);
+
+    /* Skip five warm-up launches, then report this launch's kernel-only rate
+       and, since warm-up, the wall-clock rate (kernel plus host gaps). */
+    if (c->info && ++c->launches > 5) {
+        double now = now_sec();
+        if (c->measure_start == 0.0) {
+            c->measure_start = now;
+        } else {
+            cl_ulong started = 0, ended = 0;
+            clGetEventProfilingInfo(c->event, CL_PROFILING_COMMAND_START, sizeof started, &started, NULL);
+            clGetEventProfilingInfo(c->event, CL_PROFILING_COMMAND_END, sizeof ended, &ended, NULL);
+            double kernel_sec = (double)(ended - started) * profiling_tick_ns() * 1e-9;
+            c->measured_attempts += total;
+            c->measured_kernel_sec += kernel_sec;
+            fprintf(stderr, "\nclrate: launch=%.1fM/s iters=%u kernel=%.3fs host=%.3fs | wall=%.2fM/s kernel_avg=%.2fM/s over %.1fs\n",
+                    total / kernel_sec / 1e6, c->max_iters, kernel_sec, elapsed,
+                    c->measured_attempts / (now - c->measure_start) / 1e6,
+                    c->measured_attempts / c->measured_kernel_sec / 1e6,
+                    now - c->measure_start);
+        }
+    }
 
     clReleaseEvent(c->event);
     c->in_flight = 0;
