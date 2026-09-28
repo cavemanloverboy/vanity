@@ -428,8 +428,8 @@ void *gpu_keypair_init(int id, uint8_t *patterns, uint64_t patterns_len,
                                     c->info ? CL_QUEUE_PROFILING_ENABLE : 0, &err);
     CK(err, "clCreateCommandQueue");
 
-    const char *srcs[] = { CL_PREAMBLE, CL_SHA256, CL_SHA512, CL_FE, CL_PRECOMP, CL_GE, CL_BASE58, CL_KEYPAIR };
-    c->program = build_program(c->context, dev, srcs, 8, "keypair");
+    const char *srcs[] = { CL_PREAMBLE, CL_SHA256, CL_SHA512, CL_FE, CL_PRECOMP, CL_GE, CL_BASE58, CL_KEYPAIR, CL_KEYPAIR_SELFTEST };
+    c->program = build_program(c->context, dev, srcs, 9, "keypair");
     c->kernel = clCreateKernel(c->program, "vanity_keypair_search", &err);
     CK(err, "clCreateKernel(vanity_keypair_search)");
 
@@ -580,6 +580,59 @@ void gpu_keypair_destroy(void *opaque) {
     clReleaseContext(c->context);
     free(c->counts_host);
     free(c);
+}
+
+/* Compute the public keys of `count` seeds (32 bytes each) on the device with
+   this context's comb table, writing 32 bytes per seed to `out`. Backs the
+   gpu-self-test command. */
+void gpu_keypair_pubkeys(void *opaque, const uint8_t *seeds, uint64_t count, uint8_t *out) {
+    KeypairCtx *c = (KeypairCtx *)opaque;
+    cl_int err;
+    cl_kernel kernel = clCreateKernel(c->program, "pubkeys_from_seeds", &err);
+    CK(err, "clCreateKernel(pubkeys_from_seeds)");
+    cl_mem input = buf_copy(c->context, count * 32, seeds);
+    cl_mem output = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, count * 32, NULL, &err);
+    CK(err, "buf self-test pubkeys");
+    cl_uint n = (cl_uint)count;
+    CK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &input), "arg seeds");
+    CK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &output), "arg pubkeys");
+    CK(clSetKernelArg(kernel, 2, sizeof(cl_mem), &c->comb), "arg comb");
+    CK(clSetKernelArg(kernel, 3, sizeof(cl_uint), &n), "arg count");
+    size_t global = (size_t)count;
+    CK(clEnqueueNDRangeKernel(c->queue, kernel, 1, NULL, &global, NULL, 0, NULL, NULL),
+       "enqueue pubkeys_from_seeds");
+    CK(clEnqueueReadBuffer(c->queue, output, CL_TRUE, 0, count * 32, out, 0, NULL, NULL),
+       "read self-test pubkeys");
+    clReleaseMemObject(input);
+    clReleaseMemObject(output);
+    clReleaseKernel(kernel);
+}
+
+/* Run the search kernel's matcher on `count` arbitrary 32-byte keys, writing
+   1 to `flags` for each key that matches a pattern. Backs the gpu-self-test
+   command's matcher check. */
+void gpu_keypair_match(void *opaque, const uint8_t *keys, uint64_t count, uint8_t *flags) {
+    KeypairCtx *c = (KeypairCtx *)opaque;
+    cl_int err;
+    cl_kernel kernel = clCreateKernel(c->program, "match_keys", &err);
+    CK(err, "clCreateKernel(match_keys)");
+    cl_mem input = buf_copy(c->context, count * 32, keys);
+    cl_mem output = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, count, NULL, &err);
+    CK(err, "buf self-test flags");
+    cl_uint n = (cl_uint)count;
+    CK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &input), "arg keys");
+    CK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &output), "arg flags");
+    CK(clSetKernelArg(kernel, 2, sizeof(cl_mem), &c->mlut), "arg mlut");
+    CK(clSetKernelArg(kernel, 3, sizeof(cl_mem), &c->patterns), "arg patterns");
+    CK(clSetKernelArg(kernel, 4, sizeof(cl_uint), &n), "arg count");
+    size_t global = (size_t)count;
+    CK(clEnqueueNDRangeKernel(c->queue, kernel, 1, NULL, &global, NULL, 0, NULL, NULL),
+       "enqueue match_keys");
+    CK(clEnqueueReadBuffer(c->queue, output, CL_TRUE, 0, count, flags, 0, NULL, NULL),
+       "read self-test flags");
+    clReleaseMemObject(input);
+    clReleaseMemObject(output);
+    clReleaseKernel(kernel);
 }
 
 /* ─── doppler context ────────────────────────────────────────────────────── */

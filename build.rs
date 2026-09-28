@@ -122,6 +122,7 @@ fn build_opencl_libs() {
         ("CL_GE", "ge.cl"),
         ("CL_VANITY", "vanity.cl"),
         ("CL_KEYPAIR", "keypair.cl"),
+        ("CL_KEYPAIR_SELFTEST", "keypair_selftest.cl"),
         ("CL_DOPPLER", "doppler.cl"),
     ];
 

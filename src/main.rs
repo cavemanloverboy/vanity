@@ -47,6 +47,22 @@ pub enum Command {
     Verify(VerifyArgs),
     #[cfg(feature = "deploy")]
     Deploy(DeployArgs),
+    #[cfg(feature = "opencl")]
+    GpuSelfTest(GpuSelfTestArgs),
+}
+
+/// Check the OpenCL keypair kernel against CPU references: its public keys
+/// against ed25519-dalek and, given `--pattern`, its matcher against the CPU
+/// base58 check. Exits non-zero on any difference.
+#[cfg(feature = "opencl")]
+#[derive(Debug, Parser)]
+pub struct GpuSelfTestArgs {
+    /// Number of random seeds, and of random keys for the matcher check
+    #[clap(long, default_value_t = 1_000_000)]
+    pub count: u64,
+
+    #[clap(flatten)]
+    pub spec: PatternArgs,
 }
 
 /// Repeatable vanity target: a pubkey matches if it matches any `--pattern`.
@@ -968,6 +984,130 @@ fn main() {
         Command::Verify(args) => verify(args),
         #[cfg(feature = "deploy")]
         Command::Deploy(args) => deploy(args),
+        #[cfg(feature = "opencl")]
+        Command::GpuSelfTest(args) => gpu_self_test(args),
+    }
+}
+
+/// Derive the public keys of random seeds on GPU 0 and with ed25519-dalek,
+/// exiting non-zero if any differ; then, given `--pattern`, check the GPU
+/// matcher the same way.
+#[cfg(feature = "opencl")]
+fn gpu_self_test(args: GpuSelfTestArgs) {
+    let count = args.count as usize;
+    let mut seeds = vec![0u8; count * 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut seeds);
+    let mut gpu_pubkeys = vec![0u8; count * 32];
+
+    let ctx =
+        unsafe { gpu_keypair_init(0, std::ptr::null(), 0, false) };
+    let gpu_start = Instant::now();
+    unsafe {
+        gpu_keypair_pubkeys(
+            ctx,
+            seeds.as_ptr(),
+            count as u64,
+            gpu_pubkeys.as_mut_ptr(),
+        )
+    };
+    let gpu_secs = gpu_start.elapsed().as_secs_f64();
+    unsafe { gpu_keypair_destroy(ctx) };
+
+    let mismatches: Vec<usize> = (0..count)
+        .into_par_iter()
+        .filter(|&i| {
+            let seed: [u8; 32] = seeds[i * 32..i * 32 + 32]
+                .try_into()
+                .unwrap();
+            SigningKey::from_bytes(&seed)
+                .verifying_key()
+                .to_bytes()
+                != gpu_pubkeys[i * 32..i * 32 + 32]
+        })
+        .collect();
+    eprintln!(
+        "gpu self-test: {count} seeds, {} mismatches (gpu {gpu_secs:.3}s)",
+        mismatches.len()
+    );
+    if let Some(&i) = mismatches.first() {
+        let seed: [u8; 32] = seeds[i * 32..i * 32 + 32]
+            .try_into()
+            .unwrap();
+        let gpu: [u8; 32] = gpu_pubkeys[i * 32..i * 32 + 32]
+            .try_into()
+            .unwrap();
+        let expected = SigningKey::from_bytes(&seed)
+            .verifying_key()
+            .to_bytes();
+        eprintln!(
+            "first mismatch: seed {} expected {} gpu {}",
+            fd_bs58::encode_32(seed),
+            fd_bs58::encode_32(expected),
+            fd_bs58::encode_32(gpu),
+        );
+        std::process::exit(1);
+    }
+
+    if !args.spec.pattern.is_empty() {
+        gpu_self_test_matcher(&args);
+    }
+}
+
+/// Run the GPU matcher on random 32-byte keys and compare each verdict with
+/// the CPU check that grind-keypair applies to GPU results, exiting non-zero
+/// on any difference.
+#[cfg(feature = "opencl")]
+fn gpu_self_test_matcher(args: &GpuSelfTestArgs) {
+    let spec = resolve_spec(&args.spec);
+    let blob =
+        fast::MatchTargets::new(&spec.pairs(), spec.case_insensitive)
+            .gpu_blob();
+    let count = args.count as usize;
+    let mut keys = vec![0u8; count * 32];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut keys);
+    let mut flags = vec![0u8; count];
+
+    let ctx = unsafe {
+        gpu_keypair_init(
+            0,
+            blob.as_ptr(),
+            blob.len() as u64,
+            spec.case_insensitive,
+        )
+    };
+    unsafe {
+        gpu_keypair_match(
+            ctx,
+            keys.as_ptr(),
+            count as u64,
+            flags.as_mut_ptr(),
+        )
+    };
+    unsafe { gpu_keypair_destroy(ctx) };
+
+    let expected: Vec<bool> = (0..count)
+        .into_par_iter()
+        .map(|i| {
+            let key: [u8; 32] = keys[i * 32..i * 32 + 32]
+                .try_into()
+                .unwrap();
+            spec.match_mask(&fd_bs58::encode_32(key)) != 0
+        })
+        .collect();
+    let matches = expected.iter().filter(|&&m| m).count();
+    let missed = (0..count)
+        .filter(|&i| expected[i] && flags[i] == 0)
+        .count();
+    let extra = (0..count)
+        .filter(|&i| !expected[i] && flags[i] != 0)
+        .count();
+    eprintln!(
+        "gpu matcher self-test: {} pattern(s), case-insensitive {}: {count} keys, {matches} matches, {missed} missed, {extra} false",
+        spec.patterns.len(),
+        spec.case_insensitive,
+    );
+    if missed > 0 || extra > 0 {
+        std::process::exit(1);
     }
 }
 
@@ -1352,6 +1492,15 @@ fn grind_keypair(mut args: GrindKeypairArgs) {
                                         &found_seed,
                                         &pubkey_bytes,
                                         &pubkey_str,
+                                    );
+                                });
+                            } else if mask == 0 && found_seed != [0u8; 32] {
+                                // The kernel only reports keys it matched, so
+                                // a key the CPU matches to no pattern means
+                                // the GPU is computing wrong keys.
+                                ui_with_match(|| {
+                                    eprintln!(
+                                        "gpu {i} reported {pubkey_str}, which matches no --pattern: the GPU kernel is computing wrong keys"
                                     );
                                 });
                             }
@@ -1820,6 +1969,20 @@ extern "C" {
     pub fn gpu_keypair_set_active_mask(
         ctx: *mut std::ffi::c_void,
         mask: u64,
+    );
+    #[cfg(feature = "opencl")]
+    pub fn gpu_keypair_pubkeys(
+        ctx: *mut std::ffi::c_void,
+        seeds: *const u8,
+        count: u64,
+        out: *mut u8,
+    );
+    #[cfg(feature = "opencl")]
+    pub fn gpu_keypair_match(
+        ctx: *mut std::ffi::c_void,
+        keys: *const u8,
+        count: u64,
+        flags: *mut u8,
     );
 
     pub fn gpu_doppler_init(
