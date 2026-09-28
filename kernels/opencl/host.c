@@ -145,8 +145,11 @@ static cl_device_id select_device(int id, cl_platform_id *plat) {
     exit(EXIT_FAILURE);
 }
 
-static cl_program build_program(cl_context ctx, cl_device_id dev,
-                                const char **srcs, cl_uint n, const char *name) {
+/* Compile `srcs` for `dev` with -cl-std=CL1.2, the given `defines` and any
+   VANITY_CL_OPTS; exit with the build log on failure. */
+static cl_program build_program_with(cl_context ctx, cl_device_id dev,
+                                     const char **srcs, cl_uint n, const char *name,
+                                     const char *defines) {
     size_t lens[16];
     for (cl_uint i = 0; i < n; i++) lens[i] = strlen(srcs[i]);
     cl_int err;
@@ -157,7 +160,7 @@ static cl_program build_program(cl_context ctx, cl_device_id dev,
        then rejects `fe_add(r->X, …)` (generic vs private). */
     char options[512];
     const char *extra = getenv("VANITY_CL_OPTS");
-    snprintf(options, sizeof options, "-cl-std=CL1.2 %s", extra ? extra : "");
+    snprintf(options, sizeof options, "-cl-std=CL1.2 %s %s", defines, extra ? extra : "");
     err = clBuildProgram(prog, 1, &dev, options, NULL, NULL);
     if (err != CL_SUCCESS) {
         size_t log_sz = 0;
@@ -170,6 +173,12 @@ static cl_program build_program(cl_context ctx, cl_device_id dev,
         exit(EXIT_FAILURE);
     }
     return prog;
+}
+
+/* build_program_with, without extra defines. */
+static cl_program build_program(cl_context ctx, cl_device_id dev,
+                                const char **srcs, cl_uint n, const char *name) {
+    return build_program_with(ctx, dev, srcs, n, name, "");
 }
 
 static cl_uint compute_units(cl_device_id dev) {
@@ -408,11 +417,74 @@ typedef struct {
     uint64_t measured_attempts;
     double   measured_kernel_sec;
     double   measure_start;
+    int      apple;
 } KeypairCtx;
 
 /* ge_niels = 4 fe × 10 × 4 bytes; must match OpenCL layout. */
 #define COMB_NIELS_BYTES 160u
 #define COMB_TABLE_BYTES (52u * 16u * COMB_NIELS_BYTES)
+
+/* Whether the keypair search runs the Apple GPU path (fe32.cl, ge32.cl,
+   keypair32.cl) rather than keypair.cl: VANITY_OPENCL_PROFILE=apple or
+   =portable decides, else whether the device vendor is Apple. The Apple path
+   is tuned and measured only on Apple GPUs, so other devices keep the
+   original kernels. */
+static int use_apple_path(cl_device_id dev) {
+    const char *profile = getenv("VANITY_OPENCL_PROFILE");
+    if (profile && strcmp(profile, "apple") == 0) return 1;
+    if (profile && strcmp(profile, "portable") == 0) return 0;
+    char vendor[128] = {0};
+    clGetDeviceInfo(dev, CL_DEVICE_VENDOR, sizeof vendor - 1, vendor, NULL);
+    return strstr(vendor, "Apple") != NULL;
+}
+
+/* The Apple path's comb window width in bits: VANITY_COMB_W if it is within
+   2..16, else 13, the fastest measured on an M3 Max (a 7.9 MB table). The
+   kernels are built with the same value as -DCOMB32_W. */
+static unsigned comb32_width(void) {
+    unsigned width = env_uint("VANITY_COMB_W", 13);
+    return (width >= 2 && width <= 16) ? width : 13;
+}
+
+/* A comb32 table entry (ge32_precomp or ge32_affine) is 3 fe32 × 8 limbs ×
+   4 bytes; a window base (ref10 ge_p3) is 4 fe × 10 limbs × 4 bytes. */
+#define COMB32_ENTRY_BYTES 96u
+#define COMB32_BASE_BYTES  160u
+
+/* Allocate and fill the Apple path's comb table: the window bases on one
+   work-item (a doubling chain), then every entry in parallel from its
+   window's base. */
+static cl_mem build_comb32(cl_context context, cl_command_queue queue, cl_program program) {
+    unsigned width = comb32_width();
+    size_t windows = (256u + width - 1u) / width;
+    size_t entries = windows << (width - 1u);
+    cl_int err;
+
+    cl_mem table = clCreateBuffer(context, CL_MEM_READ_WRITE, entries * COMB32_ENTRY_BYTES, NULL, &err);
+    CK(err, "buf comb32");
+    cl_mem bases = clCreateBuffer(context, CL_MEM_READ_WRITE, windows * COMB32_BASE_BYTES, NULL, &err);
+    CK(err, "buf comb32 bases");
+
+    cl_kernel build_bases = clCreateKernel(program, "build_comb32_bases", &err);
+    CK(err, "clCreateKernel(build_comb32_bases)");
+    CK(clSetKernelArg(build_bases, 0, sizeof(cl_mem), &bases), "arg comb32 bases");
+    size_t one = 1;
+    CK(clEnqueueNDRangeKernel(queue, build_bases, 1, NULL, &one, &one, 0, NULL, NULL),
+       "enqueue build_comb32_bases");
+
+    cl_kernel build_table = clCreateKernel(program, "build_comb32_table", &err);
+    CK(err, "clCreateKernel(build_comb32_table)");
+    CK(clSetKernelArg(build_table, 0, sizeof(cl_mem), &bases), "arg comb32 bases");
+    CK(clSetKernelArg(build_table, 1, sizeof(cl_mem), &table), "arg comb32");
+    CK(clEnqueueNDRangeKernel(queue, build_table, 1, NULL, &entries, NULL, 0, NULL, NULL),
+       "enqueue build_comb32_table");
+    CK(clFinish(queue), "finish comb32 table");
+
+    clReleaseKernel(build_bases);
+    clReleaseKernel(build_table);
+    clReleaseMemObject(bases);
+    return table;
+}
 
 void *gpu_keypair_init(int id, uint8_t *patterns, uint64_t patterns_len,
                        bool case_insensitive) {
@@ -428,10 +500,21 @@ void *gpu_keypair_init(int id, uint8_t *patterns, uint64_t patterns_len,
                                     c->info ? CL_QUEUE_PROFILING_ENABLE : 0, &err);
     CK(err, "clCreateCommandQueue");
 
-    const char *srcs[] = { CL_PREAMBLE, CL_SHA256, CL_SHA512, CL_FE, CL_PRECOMP, CL_GE, CL_BASE58, CL_KEYPAIR, CL_KEYPAIR_SELFTEST };
-    c->program = build_program(c->context, dev, srcs, 9, "keypair");
-    c->kernel = clCreateKernel(c->program, "vanity_keypair_search", &err);
-    CK(err, "clCreateKernel(vanity_keypair_search)");
+    c->apple = use_apple_path(dev);
+    if (c->apple) {
+        const char *srcs[] = { CL_PREAMBLE, CL_SHA256, CL_SHA512, CL_FE, CL_FE32, CL_PRECOMP,
+                               CL_GE, CL_GE32, CL_BASE58, CL_KEYPAIR32 };
+        char defines[64];
+        snprintf(defines, sizeof defines, "-DCOMB32_W=%u", comb32_width());
+        c->program = build_program_with(c->context, dev, srcs, 10, "keypair (apple)", defines);
+        c->kernel = clCreateKernel(c->program, "vanity_keypair_search32", &err);
+        CK(err, "clCreateKernel(vanity_keypair_search32)");
+    } else {
+        const char *srcs[] = { CL_PREAMBLE, CL_SHA256, CL_SHA512, CL_FE, CL_PRECOMP, CL_GE, CL_BASE58, CL_KEYPAIR, CL_KEYPAIR_SELFTEST };
+        c->program = build_program(c->context, dev, srcs, 9, "keypair");
+        c->kernel = clCreateKernel(c->program, "vanity_keypair_search", &err);
+        CK(err, "clCreateKernel(vanity_keypair_search)");
+    }
 
     c->local  = clamp_local(dev, env_uint("VANITY_KP_LOCAL", KP_LOCAL));
     c->global = (size_t)compute_units(dev) * env_uint("VANITY_KP_WAVES", KP_WAVES) * c->local;
@@ -443,8 +526,9 @@ void *gpu_keypair_init(int id, uint8_t *patterns, uint64_t patterns_len,
         clGetDeviceInfo(dev, CL_DEVICE_NAME, sizeof name - 1, name, NULL);
         clGetDeviceInfo(dev, CL_DEVICE_VENDOR, sizeof vendor - 1, vendor, NULL);
         clGetKernelWorkGroupInfo(c->kernel, dev, CL_KERNEL_WORK_GROUP_SIZE, sizeof kernel_wg, &kernel_wg, NULL);
-        fprintf(stderr, "\nclinfo: device=%s vendor=%s compute_units=%u local=%zu global=%zu kernel_max_wg=%zu\n",
-                name, vendor, compute_units(dev), c->local, c->global, kernel_wg);
+        fprintf(stderr, "\nclinfo: device=%s vendor=%s path=%s compute_units=%u local=%zu global=%zu kernel_max_wg=%zu\n",
+                name, vendor, c->apple ? "apple" : "portable", compute_units(dev),
+                c->local, c->global, kernel_wg);
     }
 
     /* Canonical base58 match indices + LUT (same scheme as gpu_grind_init /
@@ -470,10 +554,13 @@ void *gpu_keypair_init(int id, uint8_t *patterns, uint64_t patterns_len,
     c->out    = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, 32, NULL, &err); CK(err, "buf out");
     c->done   = clCreateBuffer(c->context, CL_MEM_READ_WRITE, sizeof(cl_int), NULL, &err); CK(err, "buf done");
     c->counts = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, c->global * sizeof(cl_uint), NULL, &err); CK(err, "buf counts");
-    c->comb   = clCreateBuffer(c->context, CL_MEM_READ_WRITE, COMB_TABLE_BYTES, NULL, &err); CK(err, "buf comb");
 
-    /* Build radix-32 comb table once (single work-item). */
-    {
+    if (c->apple) {
+        c->comb = build_comb32(c->context, c->queue, c->program);
+    } else {
+        c->comb = clCreateBuffer(c->context, CL_MEM_READ_WRITE, COMB_TABLE_BYTES, NULL, &err); CK(err, "buf comb");
+
+        /* Build radix-32 comb table once (single work-item). */
         cl_kernel build = clCreateKernel(c->program, "build_comb_table", &err);
         CK(err, "clCreateKernel(build_comb_table)");
         CK(clSetKernelArg(build, 0, sizeof(cl_mem), &c->comb), "arg comb");
@@ -588,7 +675,7 @@ void gpu_keypair_destroy(void *opaque) {
 void gpu_keypair_pubkeys(void *opaque, const uint8_t *seeds, uint64_t count, uint8_t *out) {
     KeypairCtx *c = (KeypairCtx *)opaque;
     cl_int err;
-    cl_kernel kernel = clCreateKernel(c->program, "pubkeys_from_seeds", &err);
+    cl_kernel kernel = clCreateKernel(c->program, c->apple ? "pubkeys_from_seeds32" : "pubkeys_from_seeds", &err);
     CK(err, "clCreateKernel(pubkeys_from_seeds)");
     cl_mem input = buf_copy(c->context, count * 32, seeds);
     cl_mem output = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, count * 32, NULL, &err);
@@ -614,7 +701,7 @@ void gpu_keypair_pubkeys(void *opaque, const uint8_t *seeds, uint64_t count, uin
 void gpu_keypair_match(void *opaque, const uint8_t *keys, uint64_t count, uint8_t *flags) {
     KeypairCtx *c = (KeypairCtx *)opaque;
     cl_int err;
-    cl_kernel kernel = clCreateKernel(c->program, "match_keys", &err);
+    cl_kernel kernel = clCreateKernel(c->program, c->apple ? "match_keys32" : "match_keys", &err);
     CK(err, "clCreateKernel(match_keys)");
     cl_mem input = buf_copy(c->context, count * 32, keys);
     cl_mem output = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, count, NULL, &err);

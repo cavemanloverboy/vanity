@@ -118,11 +118,14 @@ fn build_opencl_libs() {
         ("CL_SHA512", "sha512.cl"),
         ("CL_BASE58", "base58.cl"),
         ("CL_FE", "fe.cl"),
+        ("CL_FE32", "fe32.cl"),
         ("CL_PRECOMP", "precomp.cl"),
         ("CL_GE", "ge.cl"),
+        ("CL_GE32", "ge32.cl"),
         ("CL_VANITY", "vanity.cl"),
         ("CL_KEYPAIR", "keypair.cl"),
         ("CL_KEYPAIR_SELFTEST", "keypair_selftest.cl"),
+        ("CL_KEYPAIR32", "keypair32.cl"),
         ("CL_DOPPLER", "doppler.cl"),
     ];
 
