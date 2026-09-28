@@ -38,6 +38,8 @@ cargo install vanity --features=opencl
 
 The OpenCL backend needs only an OpenCL 1.2 ICD loader and headers at build time (`-lOpenCL` on Linux, the system `OpenCL.framework` on macOS); kernels are compiled at runtime for whatever device is present. It exposes the same CLI and `--num-gpus` flag as the CUDA build. The two GPU backends are mutually exclusive — pick one feature at build time.
 
+On Apple GPUs the OpenCL keypair search runs a path tuned for them (32-bit-limb field arithmetic, a 13-bit comb and a base58 prefix pre-filter); every other OpenCL device keeps the original kernels, and `VANITY_OPENCL_PROFILE=apple|portable` overrides the choice. `vanity gpu-self-test` checks the GPU's public keys against `ed25519-dalek`, and with `--pattern` its matcher against the CPU check. On Apple Silicon `--num-cpus 1` is usually as fast as using every core, because CPU load heats the package the GPU shares.
+
 If you don't have a GPU, consider using [vast.ai](https://cloud.vast.ai/?ref_id=126830). Pls use this referral link so that I can keep using GPUs.
 
 ## Usage
@@ -213,9 +215,9 @@ Approximate single-device throughput:
 | --- | --- | --- | --- |
 | CPU    | AMD EPYC 9275F (48 threads, AVX-512 IFMA) | ~201 M | ~33 M |
 | CUDA   | RTX 4090   | ~8.6B B | ~240 M |
-| OpenCL | Apple Silicon | ~315 M  | ~15 M  |
+| OpenCL | Apple M3 Max (40-core GPU) | ~315 M  | ~44 M  |
 
-`grind` is far faster because each attempt is just a SHA-256 hash. Keypair modes (`grind-keypair`/`grind-doppler`) perform full sha512 and ed25519 scalar multiplication per attempt. Throughput scales roughly linearly with `--num-gpus`.
+`grind` is far faster because each attempt is just a SHA-256 hash. Keypair modes (`grind-keypair`/`grind-doppler`) perform full sha512 and ed25519 scalar multiplication per attempt. Throughput scales roughly linearly with `--num-gpus`. The Apple M3 Max keypair figure is with the laptop cool; under sustained load it throttles to roughly 30 M keypairs/s.
 
 
 ## Acknowledgements, External Libraries

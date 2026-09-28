@@ -108,6 +108,46 @@ static int sha512_final(sha512_context *md, uchar *out) {
     return 0;
 }
 
+/* SHA-512 of a 32-byte message. It fits one block: the four message words,
+   the 0x80 marker, zeros and the 256-bit length, so the fully unrolled
+   rounds see a mostly constant schedule. Writes the 64-byte digest. */
+static void sha512_32(uchar out[64], const uchar msg[32]) {
+    ulong W[16];
+    for (int i = 0; i < 4; i++) { LOAD64H(W[i], msg + 8 * i); }
+    W[4] = 0x8000000000000000UL;
+    for (int i = 5; i < 15; i++) W[i] = 0;
+    W[15] = 256;
+
+    ulong a = 0x6a09e667f3bcc908UL, b = 0xbb67ae8584caa73bUL;
+    ulong c = 0x3c6ef372fe94f82bUL, d = 0xa54ff53a5f1d36f1UL;
+    ulong e = 0x510e527fade682d1UL, f = 0x9b05688c2b3e6c1fUL;
+    ulong g = 0x1f83d9abfb41bd6bUL, h = 0x5be0cd19137e2179UL;
+
+    #pragma unroll
+    for (int i = 0; i < 80; i++) {
+        ulong w;
+        if (i < 16) {
+            w = W[i];
+        } else {
+            w = Gamma1(W[(i - 2) & 15]) + W[(i - 7) & 15] + Gamma0(W[(i - 15) & 15]) + W[i & 15];
+            W[i & 15] = w;
+        }
+        ulong t0 = h + Sigma1(e) + Ch(e, f, g) + K512[i] + w;
+        ulong t1 = Sigma0(a) + Maj(a, b, c);
+        h = g; g = f; f = e; e = d + t0;
+        d = c; c = b; b = a; a = t0 + t1;
+    }
+
+    a += 0x6a09e667f3bcc908UL; b += 0xbb67ae8584caa73bUL;
+    c += 0x3c6ef372fe94f82bUL; d += 0xa54ff53a5f1d36f1UL;
+    e += 0x510e527fade682d1UL; f += 0x9b05688c2b3e6c1fUL;
+    g += 0x1f83d9abfb41bd6bUL; h += 0x5be0cd19137e2179UL;
+    STORE64H(a, out);      STORE64H(b, out + 8);
+    STORE64H(c, out + 16); STORE64H(d, out + 24);
+    STORE64H(e, out + 32); STORE64H(f, out + 40);
+    STORE64H(g, out + 48); STORE64H(h, out + 56);
+}
+
 #undef Ch
 #undef Maj
 #undef S

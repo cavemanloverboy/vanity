@@ -49,3 +49,31 @@ static uint64_t load_4(const uchar *in) {
     result |= ((uint64_t) in[3]) << 24;
     return result;
 }
+
+/* Apple GPU keypair path (fe32.cl, ge32.cl, keypair32.cl): a field element
+   as eight little-endian 32-bit limbs, and the point forms built from it. */
+typedef uint fe32[8];
+typedef struct { fe32 X; fe32 Y; fe32 Z; }          ge32_p2;
+typedef struct { fe32 X; fe32 Y; fe32 Z; fe32 T; }  ge32_p3;
+typedef struct { fe32 X; fe32 Y; fe32 Z; fe32 T; }  ge32_p1p1;
+typedef struct { fe32 yplusx; fe32 yminusx; fe32 xy2d; } ge32_precomp;
+/* Affine point with its x*y product: comb window 0, which loads straight
+   into the accumulator with no multiplication. */
+typedef struct { fe32 x; fe32 y; fe32 xy; } ge32_affine;
+
+/* The Apple path's signed fixed-base comb: COMB32_WINDOWS windows of COMB32_W
+   bits, each holding the COMB32_POS affine multiples 1..2^(COMB32_W-1) of
+   2^(COMB32_W*window)*B. The host passes -DCOMB32_W. COMB32_WINDOWS*COMB32_W
+   >= 256 keeps the top digit plus its carry within COMB32_POS for a clamped
+   scalar, which is below 2^255. */
+#ifndef COMB32_W
+#define COMB32_W 13
+#endif
+#define COMB32_WINDOWS   ((256 + COMB32_W - 1) / COMB32_W)
+#define COMB32_POS       (1 << (COMB32_W - 1))
+#define COMB32_TABLE_LEN (COMB32_WINDOWS * COMB32_POS)
+
+/* Keys per Montgomery batch in the Apple search kernel. */
+#ifndef KP32_BATCH
+#define KP32_BATCH 16
+#endif

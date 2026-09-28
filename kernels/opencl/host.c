@@ -15,6 +15,7 @@
 
 #ifdef __APPLE__
 #include <OpenCL/opencl.h>
+#include <mach/mach_time.h>
 #else
 #include <CL/cl.h>
 #endif
@@ -73,6 +74,36 @@ static double now_sec(void) {
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
 }
 
+/* Tuning override: the VANITY_<name> environment variable if set, else the default. */
+static unsigned env_uint(const char *name, unsigned fallback) {
+    const char *v = getenv(name);
+    return (v && *v) ? (unsigned)strtoul(v, NULL, 10) : fallback;
+}
+
+/* Tuning override for a floating-point knob; see env_uint. */
+static double env_double(const char *name, double fallback) {
+    const char *v = getenv(name);
+    return (v && *v) ? strtod(v, NULL) : fallback;
+}
+
+/* Whether VANITY_CL_INFO asks for device and per-launch throughput logging. */
+static int cl_info_enabled(void) {
+    const char *v = getenv("VANITY_CL_INFO");
+    return v && *v && *v != '0';
+}
+
+/* Nanoseconds per OpenCL profiling tick. Apple reports profiling timestamps
+   in Mach ticks (41.67 ns on Apple Silicon) rather than nanoseconds. */
+static double profiling_tick_ns(void) {
+#ifdef __APPLE__
+    mach_timebase_info_data_t timebase;
+    mach_timebase_info(&timebase);
+    return (double)timebase.numer / (double)timebase.denom;
+#else
+    return 1.0;
+#endif
+}
+
 /* ─── OpenCL plumbing ────────────────────────────────────────────────────── */
 
 static void cl_die(const char *what, cl_int err) {
@@ -114,8 +145,11 @@ static cl_device_id select_device(int id, cl_platform_id *plat) {
     exit(EXIT_FAILURE);
 }
 
-static cl_program build_program(cl_context ctx, cl_device_id dev,
-                                const char **srcs, cl_uint n, const char *name) {
+/* Compile `srcs` for `dev` with -cl-std=CL1.2, the given `defines` and any
+   VANITY_CL_OPTS; exit with the build log on failure. */
+static cl_program build_program_with(cl_context ctx, cl_device_id dev,
+                                     const char **srcs, cl_uint n, const char *name,
+                                     const char *defines) {
     size_t lens[16];
     for (cl_uint i = 0; i < n; i++) lens[i] = strlen(srcs[i]);
     cl_int err;
@@ -124,7 +158,10 @@ static cl_program build_program(cl_context ctx, cl_device_id dev,
     /* CL1.2: `fe` array parameters stay __private, matching struct fields
        of private ge_* values. Newer clang defaults to CL2+/generic AS and
        then rejects `fe_add(r->X, …)` (generic vs private). */
-    err = clBuildProgram(prog, 1, &dev, "-cl-std=CL1.2", NULL, NULL);
+    char options[512];
+    const char *extra = getenv("VANITY_CL_OPTS");
+    snprintf(options, sizeof options, "-cl-std=CL1.2 %s %s", defines, extra ? extra : "");
+    err = clBuildProgram(prog, 1, &dev, options, NULL, NULL);
     if (err != CL_SUCCESS) {
         size_t log_sz = 0;
         clGetProgramBuildInfo(prog, dev, CL_PROGRAM_BUILD_LOG, 0, NULL, &log_sz);
@@ -136,6 +173,12 @@ static cl_program build_program(cl_context ctx, cl_device_id dev,
         exit(EXIT_FAILURE);
     }
     return prog;
+}
+
+/* build_program_with, without extra defines. */
+static cl_program build_program(cl_context ctx, cl_device_id dev,
+                                const char **srcs, cl_uint n, const char *name) {
+    return build_program_with(ctx, dev, srcs, n, name, "");
 }
 
 static cl_uint compute_units(cl_device_id dev) {
@@ -161,7 +204,7 @@ static cl_mem buf_copy(cl_context ctx, size_t sz, const void *host) {
 /* Grow/shrink max_iters toward TARGET_LAUNCH_SEC based on last launch time. */
 static uint32_t adapt_iters(uint32_t cur, double elapsed, uint32_t lo, uint32_t hi) {
     if (elapsed <= 1e-6) return hi;
-    double factor = TARGET_LAUNCH_SEC / elapsed;
+    double factor = env_double("VANITY_TARGET_SEC", TARGET_LAUNCH_SEC) / elapsed;
     if (factor < 0.25) factor = 0.25;
     if (factor > 4.0)  factor = 4.0;
     double next = (double)cur * factor;
@@ -355,6 +398,163 @@ void gpu_grind_destroy(void *opaque) {
     free(c);
 }
 
+/* ─── base58 prefix pre-filter (Apple path) ────────────────────────────── */
+
+/* An unsigned integer below 2^320 as ten little-endian 32-bit limbs: room for
+   58^44, the largest bound a 32-byte key's base58 length needs. */
+typedef struct { uint32_t limb[10]; } Big;
+
+/* a = v. */
+static void big_set(Big *a, uint64_t v) {
+    memset(a, 0, sizeof *a);
+    a->limb[0] = (uint32_t)v;
+    a->limb[1] = (uint32_t)(v >> 32);
+}
+
+/* a = a * m. */
+static void big_mul_small(Big *a, uint32_t m) {
+    uint64_t c = 0;
+    for (int k = 0; k < 10; k++) {
+        c += (uint64_t)a->limb[k] * m;
+        a->limb[k] = (uint32_t)c;
+        c >>= 32;
+    }
+}
+
+/* a = a - 1, for a > 0. */
+static void big_decrement(Big *a) {
+    for (int k = 0; k < 10; k++) {
+        if (a->limb[k] != 0) { a->limb[k]--; return; }
+        a->limb[k] = 0xffffffffu;
+    }
+}
+
+/* Negative, zero or positive as a is below, equal to or above b. */
+static int big_cmp(const Big *a, const Big *b) {
+    for (int k = 9; k >= 0; k--)
+        if (a->limb[k] != b->limb[k]) return a->limb[k] < b->limb[k] ? -1 : 1;
+    return 0;
+}
+
+/* a = 2^bits, for bits < 320. */
+static void big_pow2(Big *a, unsigned bits) {
+    memset(a, 0, sizeof *a);
+    a->limb[bits / 32] = 1u << (bits % 32);
+}
+
+/* a = v * 58^e. */
+static void big_times_pow58(Big *a, uint64_t v, unsigned e) {
+    big_set(a, v);
+    while (e--) big_mul_small(a, 58);
+}
+
+/* Bits 192..255 of a value below 2^256: the top 64 bits of a key read as a
+   big-endian number, which is what the kernel compares against the ranges. */
+static uint64_t big_top64(const Big *a) {
+    return ((uint64_t)a->limb[7] << 32) | a->limb[6];
+}
+
+#define PREFILTER_MAX_CHARS     10u
+#define PREFILTER_MAX_SPELLINGS 256u
+#define PREFILTER_MAX_RANGES    (2u * PREFILTER_MAX_SPELLINGS)
+
+/* Fill `ranges` with sorted, disjoint [start, end] pairs over the top 64 bits
+   of every 32-byte key whose base58 form starts with some pattern's prefix,
+   in any spelling the match LUT folds together, and return how many. A key
+   outside every range matches no pattern; a key inside one still takes the
+   full base58 check, so ranges only ever need to over-cover, which also keeps
+   them right as patterns drop out of the active mask. Each pattern's ranges
+   come from the longest leading part of its prefix (at most
+   PREFILTER_MAX_CHARS characters) with at most its share of
+   PREFILTER_MAX_SPELLINGS spellings, over the two lengths a key without
+   leading zero bytes encodes to, 43 and 44 characters. Returns 0, meaning no
+   filter, when any pattern has no prefix or one that may start with '1',
+   whose keys begin with a zero byte instead. */
+static uint32_t build_prefix_ranges(const uint8_t *ptable, const uint8_t match_lut[58],
+                                    uint64_t *ranges) {
+    uint32_t n_pat = 0;
+    memcpy(&n_pat, ptable + VANITY_PT_N, 4);
+    if (n_pat == 0) return 0;
+    uint64_t budget = PREFILTER_MAX_SPELLINGS / n_pat;
+    if (budget == 0) budget = 1;
+
+    Big no_leading_zero, below_2_256;
+    big_pow2(&no_leading_zero, 248);
+    big_pow2(&below_2_256, 256);
+    big_decrement(&below_2_256);
+
+    uint32_t count = 0;
+    for (uint32_t p = 0; p < n_pat; p++) {
+        uint8_t prefix_len = ptable[VANITY_PT_PLEN + p];
+        const uint8_t *prefix_idx = ptable + VANITY_PT_PREF + p * VANITY_MAX_PATTERN_LEN;
+        uint8_t alternatives[PREFILTER_MAX_CHARS][58];
+        unsigned alternative_count[PREFILTER_MAX_CHARS];
+        unsigned used = 0;
+        uint64_t spellings = 1;
+        while (used < prefix_len && used < PREFILTER_MAX_CHARS) {
+            unsigned n = 0;
+            for (int digit = 0; digit < 58; digit++)
+                if (match_lut[digit] == prefix_idx[used]) alternatives[used][n++] = (uint8_t)digit;
+            if (n == 0 || spellings * n > budget) break;
+            alternative_count[used] = n;
+            spellings *= n;
+            used++;
+        }
+        if (used == 0) return 0;
+        for (unsigned a = 0; a < alternative_count[0]; a++)
+            if (alternatives[0][a] == 0) return 0;
+
+        for (uint64_t spelling = 0; spelling < spellings; spelling++) {
+            uint64_t value = 0, rest = spelling;
+            for (unsigned i = 0; i < used; i++) {
+                value = value * 58 + alternatives[i][rest % alternative_count[i]];
+                rest /= alternative_count[i];
+            }
+            for (unsigned length = 43; length <= 44; length++) {
+                Big start, end, bound;
+                big_times_pow58(&start, value, length - used);
+                big_times_pow58(&end, value + 1, length - used);
+                big_decrement(&end);
+                big_times_pow58(&bound, 1, length - 1);
+                if (big_cmp(&start, &bound) < 0) start = bound;
+                if (big_cmp(&start, &no_leading_zero) < 0) start = no_leading_zero;
+                big_times_pow58(&bound, 1, length);
+                big_decrement(&bound);
+                if (big_cmp(&end, &bound) > 0) end = bound;
+                if (big_cmp(&end, &below_2_256) > 0) end = below_2_256;
+                if (big_cmp(&start, &end) > 0) continue;
+                ranges[2 * count] = big_top64(&start);
+                ranges[2 * count + 1] = big_top64(&end);
+                count++;
+            }
+        }
+    }
+
+    for (uint32_t i = 1; i < count; i++) {
+        uint64_t s = ranges[2 * i], e = ranges[2 * i + 1];
+        uint32_t j = i;
+        for (; j > 0 && ranges[2 * (j - 1)] > s; j--) {
+            ranges[2 * j] = ranges[2 * (j - 1)];
+            ranges[2 * j + 1] = ranges[2 * (j - 1) + 1];
+        }
+        ranges[2 * j] = s;
+        ranges[2 * j + 1] = e;
+    }
+    uint32_t merged = 0;
+    for (uint32_t i = 0; i < count; i++) {
+        if (merged > 0 && ranges[2 * (merged - 1) + 1] == UINT64_MAX) continue;
+        if (merged > 0 && ranges[2 * i] <= ranges[2 * (merged - 1) + 1] + 1) {
+            if (ranges[2 * i + 1] > ranges[2 * (merged - 1) + 1])
+                ranges[2 * (merged - 1) + 1] = ranges[2 * i + 1];
+            continue;
+        }
+        ranges[2 * merged] = ranges[2 * i];
+        ranges[2 * merged + 1] = ranges[2 * i + 1];
+        merged++;
+    }
+    return merged;
+}
+
 /* ─── keypair context ────────────────────────────────────────────────────── */
 
 typedef struct {
@@ -362,18 +562,87 @@ typedef struct {
     cl_command_queue queue;
     cl_program       program;
     cl_kernel        kernel;
-    cl_mem  seed, mlut, patterns, out, done, counts, comb;
+    cl_mem  seed, mlut, patterns, out, done, counts, comb, ranges;
+    uint32_t range_count;
     size_t  local, global;
     uint32_t max_iters;
     cl_event event;
     int      in_flight;
     double   launch_time;
     uint32_t *counts_host;
+    int      info;
+    uint32_t launches;
+    uint64_t measured_attempts;
+    double   measured_kernel_sec;
+    double   measure_start;
+    int      apple;
 } KeypairCtx;
 
 /* ge_niels = 4 fe × 10 × 4 bytes; must match OpenCL layout. */
 #define COMB_NIELS_BYTES 160u
 #define COMB_TABLE_BYTES (52u * 16u * COMB_NIELS_BYTES)
+
+/* Whether the keypair search runs the Apple GPU path (fe32.cl, ge32.cl,
+   keypair32.cl) rather than keypair.cl: VANITY_OPENCL_PROFILE=apple or
+   =portable decides, else whether the device vendor is Apple. The Apple path
+   is tuned and measured only on Apple GPUs, so other devices keep the
+   original kernels. */
+static int use_apple_path(cl_device_id dev) {
+    const char *profile = getenv("VANITY_OPENCL_PROFILE");
+    if (profile && strcmp(profile, "apple") == 0) return 1;
+    if (profile && strcmp(profile, "portable") == 0) return 0;
+    char vendor[128] = {0};
+    clGetDeviceInfo(dev, CL_DEVICE_VENDOR, sizeof vendor - 1, vendor, NULL);
+    return strstr(vendor, "Apple") != NULL;
+}
+
+/* The Apple path's comb window width in bits: VANITY_COMB_W if it is within
+   2..16, else 13, the fastest measured on an M3 Max (a 7.9 MB table). The
+   kernels are built with the same value as -DCOMB32_W. */
+static unsigned comb32_width(void) {
+    unsigned width = env_uint("VANITY_COMB_W", 13);
+    return (width >= 2 && width <= 16) ? width : 13;
+}
+
+/* A comb32 table entry (ge32_precomp or ge32_affine) is 3 fe32 × 8 limbs ×
+   4 bytes; a window base (ref10 ge_p3) is 4 fe × 10 limbs × 4 bytes. */
+#define COMB32_ENTRY_BYTES 96u
+#define COMB32_BASE_BYTES  160u
+
+/* Allocate and fill the Apple path's comb table: the window bases on one
+   work-item (a doubling chain), then every entry in parallel from its
+   window's base. */
+static cl_mem build_comb32(cl_context context, cl_command_queue queue, cl_program program) {
+    unsigned width = comb32_width();
+    size_t windows = (256u + width - 1u) / width;
+    size_t entries = windows << (width - 1u);
+    cl_int err;
+
+    cl_mem table = clCreateBuffer(context, CL_MEM_READ_WRITE, entries * COMB32_ENTRY_BYTES, NULL, &err);
+    CK(err, "buf comb32");
+    cl_mem bases = clCreateBuffer(context, CL_MEM_READ_WRITE, windows * COMB32_BASE_BYTES, NULL, &err);
+    CK(err, "buf comb32 bases");
+
+    cl_kernel build_bases = clCreateKernel(program, "build_comb32_bases", &err);
+    CK(err, "clCreateKernel(build_comb32_bases)");
+    CK(clSetKernelArg(build_bases, 0, sizeof(cl_mem), &bases), "arg comb32 bases");
+    size_t one = 1;
+    CK(clEnqueueNDRangeKernel(queue, build_bases, 1, NULL, &one, &one, 0, NULL, NULL),
+       "enqueue build_comb32_bases");
+
+    cl_kernel build_table = clCreateKernel(program, "build_comb32_table", &err);
+    CK(err, "clCreateKernel(build_comb32_table)");
+    CK(clSetKernelArg(build_table, 0, sizeof(cl_mem), &bases), "arg comb32 bases");
+    CK(clSetKernelArg(build_table, 1, sizeof(cl_mem), &table), "arg comb32");
+    CK(clEnqueueNDRangeKernel(queue, build_table, 1, NULL, &entries, NULL, 0, NULL, NULL),
+       "enqueue build_comb32_table");
+    CK(clFinish(queue), "finish comb32 table");
+
+    clReleaseKernel(build_bases);
+    clReleaseKernel(build_table);
+    clReleaseMemObject(bases);
+    return table;
+}
 
 void *gpu_keypair_init(int id, uint8_t *patterns, uint64_t patterns_len,
                        bool case_insensitive) {
@@ -382,20 +651,50 @@ void *gpu_keypair_init(int id, uint8_t *patterns, uint64_t patterns_len,
     cl_int err;
 
     KeypairCtx *c = (KeypairCtx *)calloc(1, sizeof(KeypairCtx));
+    c->info = cl_info_enabled();
     c->context = clCreateContext(NULL, 1, &dev, NULL, NULL, &err);
     CK(err, "clCreateContext");
-    c->queue = clCreateCommandQueue(c->context, dev, 0, &err);
+    c->queue = clCreateCommandQueue(c->context, dev,
+                                    c->info ? CL_QUEUE_PROFILING_ENABLE : 0, &err);
     CK(err, "clCreateCommandQueue");
 
-    const char *srcs[] = { CL_PREAMBLE, CL_SHA256, CL_SHA512, CL_FE, CL_PRECOMP, CL_GE, CL_BASE58, CL_KEYPAIR };
-    c->program = build_program(c->context, dev, srcs, 8, "keypair");
-    c->kernel = clCreateKernel(c->program, "vanity_keypair_search", &err);
-    CK(err, "clCreateKernel(vanity_keypair_search)");
+    c->apple = use_apple_path(dev);
+    if (c->apple) {
+        const char *srcs[] = { CL_PREAMBLE, CL_SHA256, CL_SHA512, CL_FE, CL_FE32, CL_PRECOMP,
+                               CL_GE, CL_GE32, CL_BASE58, CL_KEYPAIR32 };
+        char defines[64];
+        snprintf(defines, sizeof defines, "-DCOMB32_W=%u", comb32_width());
+        c->program = build_program_with(c->context, dev, srcs, 10, "keypair (apple)", defines);
+        c->kernel = clCreateKernel(c->program, "vanity_keypair_search32", &err);
+        CK(err, "clCreateKernel(vanity_keypair_search32)");
+    } else {
+        const char *srcs[] = { CL_PREAMBLE, CL_SHA256, CL_SHA512, CL_FE, CL_PRECOMP, CL_GE, CL_BASE58, CL_KEYPAIR, CL_KEYPAIR_SELFTEST };
+        c->program = build_program(c->context, dev, srcs, 9, "keypair");
+        c->kernel = clCreateKernel(c->program, "vanity_keypair_search", &err);
+        CK(err, "clCreateKernel(vanity_keypair_search)");
+    }
 
-    c->local  = clamp_local(dev, KP_LOCAL);
-    c->global = (size_t)compute_units(dev) * KP_WAVES * c->local;
+    c->local  = clamp_local(dev, env_uint("VANITY_KP_LOCAL", KP_LOCAL));
+    if (c->apple) {
+        /* fe32_group_invert needs a power-of-two group the kernel can run. */
+        size_t kernel_max = 0;
+        clGetKernelWorkGroupInfo(c->kernel, dev, CL_KERNEL_WORK_GROUP_SIZE, sizeof kernel_max, &kernel_max, NULL);
+        if (kernel_max && c->local > kernel_max) c->local = kernel_max;
+        while (c->local & (c->local - 1)) c->local &= c->local - 1;
+    }
+    c->global = (size_t)compute_units(dev) * env_uint("VANITY_KP_WAVES", KP_WAVES) * c->local;
     c->max_iters = KP_ITERS_INIT;
     c->counts_host = (uint32_t *)malloc(c->global * sizeof(uint32_t));
+    if (c->info) {
+        char name[128] = {0}, vendor[128] = {0};
+        size_t kernel_wg = 0;
+        clGetDeviceInfo(dev, CL_DEVICE_NAME, sizeof name - 1, name, NULL);
+        clGetDeviceInfo(dev, CL_DEVICE_VENDOR, sizeof vendor - 1, vendor, NULL);
+        clGetKernelWorkGroupInfo(c->kernel, dev, CL_KERNEL_WORK_GROUP_SIZE, sizeof kernel_wg, &kernel_wg, NULL);
+        fprintf(stderr, "\nclinfo: device=%s vendor=%s path=%s compute_units=%u local=%zu global=%zu kernel_max_wg=%zu\n",
+                name, vendor, c->apple ? "apple" : "portable", compute_units(dev),
+                c->local, c->global, kernel_wg);
+    }
 
     /* Canonical base58 match indices + LUT (same scheme as gpu_grind_init /
        CUDA gpu_keypair_init). Case folding lives in the LUT / indices. */
@@ -420,10 +719,13 @@ void *gpu_keypair_init(int id, uint8_t *patterns, uint64_t patterns_len,
     c->out    = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, 32, NULL, &err); CK(err, "buf out");
     c->done   = clCreateBuffer(c->context, CL_MEM_READ_WRITE, sizeof(cl_int), NULL, &err); CK(err, "buf done");
     c->counts = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, c->global * sizeof(cl_uint), NULL, &err); CK(err, "buf counts");
-    c->comb   = clCreateBuffer(c->context, CL_MEM_READ_WRITE, COMB_TABLE_BYTES, NULL, &err); CK(err, "buf comb");
 
-    /* Build radix-32 comb table once (single work-item). */
-    {
+    if (c->apple) {
+        c->comb = build_comb32(c->context, c->queue, c->program);
+    } else {
+        c->comb = clCreateBuffer(c->context, CL_MEM_READ_WRITE, COMB_TABLE_BYTES, NULL, &err); CK(err, "buf comb");
+
+        /* Build radix-32 comb table once (single work-item). */
         cl_kernel build = clCreateKernel(c->program, "build_comb_table", &err);
         CK(err, "clCreateKernel(build_comb_table)");
         CK(clSetKernelArg(build, 0, sizeof(cl_mem), &c->comb), "arg comb");
@@ -440,6 +742,16 @@ void *gpu_keypair_init(int id, uint8_t *patterns, uint64_t patterns_len,
     CK(clSetKernelArg(c->kernel, 4, sizeof(cl_mem), &c->done), "arg done");
     CK(clSetKernelArg(c->kernel, 5, sizeof(cl_mem), &c->counts), "arg counts");
     CK(clSetKernelArg(c->kernel, 6, sizeof(cl_mem), &c->comb), "arg comb");
+    if (c->apple) {
+        uint64_t ranges[2 * PREFILTER_MAX_RANGES];
+        c->range_count = env_uint("VANITY_NO_PREFILTER", 0)
+                       ? 0 : build_prefix_ranges(ptable, match_lut, ranges);
+        c->ranges = buf_copy(c->context, (size_t)c->range_count * 16, ranges);
+        CK(clSetKernelArg(c->kernel, 8, sizeof(cl_mem), &c->ranges), "arg ranges");
+        CK(clSetKernelArg(c->kernel, 9, sizeof(cl_uint), &c->range_count), "arg range_count");
+        CK(clSetKernelArg(c->kernel, 10, 2 * c->local * 32, NULL), "arg tree");
+        if (c->info) fprintf(stderr, "\nclinfo: prefix pre-filter ranges=%u\n", c->range_count);
+    }
 
     return c;
 }
@@ -485,6 +797,27 @@ void gpu_keypair_read(void *opaque, uint8_t *out) {
     for (size_t i = 0; i < c->global; ++i) total += c->counts_host[i];
     memcpy(out + 32, &total, 8);
 
+    /* Skip five warm-up launches, then report this launch's kernel-only rate
+       and, since warm-up, the wall-clock rate (kernel plus host gaps). */
+    if (c->info && ++c->launches > 5) {
+        double now = now_sec();
+        if (c->measure_start == 0.0) {
+            c->measure_start = now;
+        } else {
+            cl_ulong started = 0, ended = 0;
+            clGetEventProfilingInfo(c->event, CL_PROFILING_COMMAND_START, sizeof started, &started, NULL);
+            clGetEventProfilingInfo(c->event, CL_PROFILING_COMMAND_END, sizeof ended, &ended, NULL);
+            double kernel_sec = (double)(ended - started) * profiling_tick_ns() * 1e-9;
+            c->measured_attempts += total;
+            c->measured_kernel_sec += kernel_sec;
+            fprintf(stderr, "\nclrate: launch=%.1fM/s iters=%u kernel=%.3fs host=%.3fs | wall=%.2fM/s kernel_avg=%.2fM/s over %.1fs\n",
+                    total / kernel_sec / 1e6, c->max_iters, kernel_sec, elapsed,
+                    c->measured_attempts / (now - c->measure_start) / 1e6,
+                    c->measured_attempts / c->measured_kernel_sec / 1e6,
+                    now - c->measure_start);
+        }
+    }
+
     clReleaseEvent(c->event);
     c->in_flight = 0;
     c->max_iters = adapt_iters(c->max_iters, elapsed, KP_ITERS_MIN, KP_ITERS_MAX);
@@ -502,6 +835,7 @@ void gpu_keypair_destroy(void *opaque) {
     clFinish(c->queue);
     if (c->in_flight) clReleaseEvent(c->event);
     cl_mem bufs[] = {c->seed,c->mlut,c->patterns,c->out,c->done,c->counts,c->comb};
+    if (c->ranges) clReleaseMemObject(c->ranges);
     for (size_t i = 0; i < sizeof bufs / sizeof bufs[0]; ++i) clReleaseMemObject(bufs[i]);
     clReleaseKernel(c->kernel);
     clReleaseProgram(c->program);
@@ -509,6 +843,65 @@ void gpu_keypair_destroy(void *opaque) {
     clReleaseContext(c->context);
     free(c->counts_host);
     free(c);
+}
+
+/* Compute the public keys of `count` seeds (32 bytes each) on the device with
+   this context's comb table, writing 32 bytes per seed to `out`. Backs the
+   gpu-self-test command. */
+void gpu_keypair_pubkeys(void *opaque, const uint8_t *seeds, uint64_t count, uint8_t *out) {
+    KeypairCtx *c = (KeypairCtx *)opaque;
+    cl_int err;
+    cl_kernel kernel = clCreateKernel(c->program, c->apple ? "pubkeys_from_seeds32" : "pubkeys_from_seeds", &err);
+    CK(err, "clCreateKernel(pubkeys_from_seeds)");
+    cl_mem input = buf_copy(c->context, count * 32, seeds);
+    cl_mem output = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, count * 32, NULL, &err);
+    CK(err, "buf self-test pubkeys");
+    cl_uint n = (cl_uint)count;
+    CK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &input), "arg seeds");
+    CK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &output), "arg pubkeys");
+    CK(clSetKernelArg(kernel, 2, sizeof(cl_mem), &c->comb), "arg comb");
+    CK(clSetKernelArg(kernel, 3, sizeof(cl_uint), &n), "arg count");
+    size_t global = (size_t)count;
+    CK(clEnqueueNDRangeKernel(c->queue, kernel, 1, NULL, &global, NULL, 0, NULL, NULL),
+       "enqueue pubkeys_from_seeds");
+    CK(clEnqueueReadBuffer(c->queue, output, CL_TRUE, 0, count * 32, out, 0, NULL, NULL),
+       "read self-test pubkeys");
+    clReleaseMemObject(input);
+    clReleaseMemObject(output);
+    clReleaseKernel(kernel);
+}
+
+/* Run the search kernel's matcher on `count` arbitrary 32-byte keys, writing
+   1 to `flags` for each key that matches a pattern. Backs the gpu-self-test
+   command's matcher check. */
+void gpu_keypair_match(void *opaque, const uint8_t *keys, uint64_t count, uint8_t *flags) {
+    KeypairCtx *c = (KeypairCtx *)opaque;
+    cl_int err;
+    cl_kernel kernel = clCreateKernel(c->program, c->apple ? "match_keys32" : "match_keys", &err);
+    CK(err, "clCreateKernel(match_keys)");
+    cl_mem input = buf_copy(c->context, count * 32, keys);
+    cl_mem output = clCreateBuffer(c->context, CL_MEM_WRITE_ONLY, count, NULL, &err);
+    CK(err, "buf self-test flags");
+    cl_uint n = (cl_uint)count;
+    CK(clSetKernelArg(kernel, 0, sizeof(cl_mem), &input), "arg keys");
+    CK(clSetKernelArg(kernel, 1, sizeof(cl_mem), &output), "arg flags");
+    CK(clSetKernelArg(kernel, 2, sizeof(cl_mem), &c->mlut), "arg mlut");
+    CK(clSetKernelArg(kernel, 3, sizeof(cl_mem), &c->patterns), "arg patterns");
+    cl_uint count_arg = 4;
+    if (c->apple) {
+        CK(clSetKernelArg(kernel, 4, sizeof(cl_mem), &c->ranges), "arg ranges");
+        CK(clSetKernelArg(kernel, 5, sizeof(cl_uint), &c->range_count), "arg range_count");
+        count_arg = 6;
+    }
+    CK(clSetKernelArg(kernel, count_arg, sizeof(cl_uint), &n), "arg count");
+    size_t global = (size_t)count;
+    CK(clEnqueueNDRangeKernel(c->queue, kernel, 1, NULL, &global, NULL, 0, NULL, NULL),
+       "enqueue match_keys");
+    CK(clEnqueueReadBuffer(c->queue, output, CL_TRUE, 0, count, flags, 0, NULL, NULL),
+       "read self-test flags");
+    clReleaseMemObject(input);
+    clReleaseMemObject(output);
+    clReleaseKernel(kernel);
 }
 
 /* ─── doppler context ────────────────────────────────────────────────────── */
