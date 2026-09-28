@@ -35,6 +35,27 @@ __constant uint enc_table_32[8][8] = {
     {0U, 0U, 0U, 0U, 0U, 0U, 6U, 356826688U},
     {0U, 0U, 0U, 0U, 0U, 0U, 0U, 1U}};
 
+/* High 64 bits of a * b. OpenCL 1.2 has no 64x64->128 multiply. */
+static ulong umulhi64(ulong a, ulong b) {
+    ulong a_lo = a & 0xffffffffUL;
+    ulong a_hi = a >> 32;
+    ulong b_lo = b & 0xffffffffUL;
+    ulong b_hi = b >> 32;
+    ulong p0 = a_lo * b_lo;
+    ulong p1 = a_lo * b_hi;
+    ulong p2 = a_hi * b_lo;
+    ulong p3 = a_hi * b_hi;
+    ulong mid = (p0 >> 32) + (p1 & 0xffffffffUL) + (p2 & 0xffffffffUL);
+    return p3 + (p1 >> 32) + (p2 >> 32) + (mid >> 32);
+}
+
+/* floor(n / 58^5). Exact for every n (the multiplier is magic for 656356768):
+   checked against integer division through the largest intermediate a 32-byte
+   input can produce, and at the top of the uint64 range. */
+static ulong div_58_5(ulong n) {
+    return umulhi64(n, 0x68b2c7ad1a016ab5UL) >> 28;
+}
+
 /* Full base58 encode of a 32-byte big-endian integer into `out` (ASCII,
    NUL-terminated). Returns the encoded length. */
 static ulong fd_base58_encode_32(const uchar *bytes, uchar *out, bool case_insensitive) {
@@ -48,16 +69,15 @@ static ulong fd_base58_encode_32(const uchar *bytes, uchar *out, bool case_insen
         binary[i] = ((uint)bytes[4*i    ] << 24) | ((uint)bytes[4*i + 1] << 16)
                   | ((uint)bytes[4*i + 2] <<  8) | ((uint)bytes[4*i + 3]      );
 
-    ulong R1div = 656356768UL; /* = 58^5 */
-
     ulong intermediate[9] = {0};
     for (ulong i = 0UL; i < 8UL; i++)
         for (ulong j = 0UL; j < 8UL; j++)
             intermediate[j + 1UL] += (ulong)binary[i] * (ulong)enc_table_32[i][j];
 
     for (ulong i = 8UL; i > 0UL; i--) {
-        intermediate[i - 1UL] += (intermediate[i] / R1div);
-        intermediate[i] %= R1div;
+        ulong q = div_58_5(intermediate[i]);
+        intermediate[i - 1UL] += q;
+        intermediate[i] -= q * 656356768UL;
     }
 
     uchar raw_base58[45];
@@ -103,16 +123,15 @@ static bool fd_base58_check_match_32_words(const uint state[8],
         if (lz_bytes != 4UL) break;
     }
 
-    ulong R1div = 656356768UL; /* = 58^5 */
-
     ulong intermediate[9] = {0};
     for (ulong i = 0UL; i < 8UL; i++)
         for (ulong j = 0UL; j < 8UL; j++)
             intermediate[j + 1UL] += (ulong)state[i] * (ulong)enc_table_32[i][j];
 
     for (ulong i = 8UL; i > 0UL; i--) {
-        intermediate[i - 1UL] += (intermediate[i] / R1div);
-        intermediate[i] %= R1div;
+        ulong q = div_58_5(intermediate[i]);
+        intermediate[i - 1UL] += q;
+        intermediate[i] -= q * 656356768UL;
     }
 
     uchar raw_base58[45];
@@ -176,15 +195,15 @@ static bool fd_base58_check_match_any_32_words(const uint state[8],
         if (lz_bytes != 4UL) break;
     }
 
-    ulong R1div = 656356768UL;
     ulong intermediate[9] = {0};
     for (ulong i = 0UL; i < 8UL; i++)
         for (ulong j = 0UL; j < 8UL; j++)
             intermediate[j + 1UL] += (ulong)state[i] * (ulong)enc_table_32[i][j];
 
     for (ulong i = 8UL; i > 0UL; i--) {
-        intermediate[i - 1UL] += (intermediate[i] / R1div);
-        intermediate[i] %= R1div;
+        ulong q = div_58_5(intermediate[i]);
+        intermediate[i - 1UL] += q;
+        intermediate[i] -= q * 656356768UL;
     }
 
     uchar raw_base58[45];

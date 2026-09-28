@@ -108,6 +108,82 @@ static int sha512_final(sha512_context *md, uchar *out) {
     return 0;
 }
 
+/* SHA-512 of a 32-byte message. It fits one block: the four message words,
+   the 0x80 marker, zeros and the 256-bit length. The first 16 extended
+   schedule words drop the zero padding instead of running the general
+   recurrence. Outlined so that schedule does not spill inside the comb.
+   Writes the 64-byte digest. */
+#define SHA512_ROUND(idx, w)                                          \
+    do {                                                              \
+        ulong t0_ = h + Sigma1(e) + Ch(e, f, g) + K512[idx] + (w);    \
+        ulong t1_ = Sigma0(a) + Maj(a, b, c);                         \
+        h = g; g = f; f = e; e = d + t0_;                             \
+        d = c; c = b; b = a; a = t0_ + t1_;                           \
+    } while (0)
+
+__attribute__((noinline))
+static void sha512_32(uchar out[64], const uchar msg[32]) {
+    ulong W[16];
+    for (int i = 0; i < 4; i++) { LOAD64H(W[i], msg + 8 * i); }
+    W[4] = 0x8000000000000000UL;
+    for (int i = 5; i < 15; i++) W[i] = 0;
+    W[15] = 256;
+
+    ulong a = 0x6a09e667f3bcc908UL, b = 0xbb67ae8584caa73bUL;
+    ulong c = 0x3c6ef372fe94f82bUL, d = 0xa54ff53a5f1d36f1UL;
+    ulong e = 0x510e527fade682d1UL, f = 0x9b05688c2b3e6c1fUL;
+    ulong g = 0x1f83d9abfb41bd6bUL, h = 0x5be0cd19137e2179UL;
+
+    #pragma unroll
+    for (int i = 0; i < 16; i++) SHA512_ROUND(i, W[i]);
+
+    /* W[5..14] are zero and W[15] is 256. These are W[16..31]. */
+    {
+        ulong n0 = Gamma0(W[1]) + W[0];
+        ulong n1 = 9007199254743044UL + Gamma0(W[2]) + W[1];
+        ulong n2 = Gamma1(n0) + Gamma0(W[3]) + W[2];
+        ulong n3 = Gamma1(n1) + 4719772409484279808UL + W[3];
+        ulong n4 = Gamma1(n2) + 9223372036854775808UL;
+        ulong n5 = Gamma1(n3);
+        ulong n6 = Gamma1(n4) + 256UL;
+        ulong n7 = Gamma1(n5) + n0;
+        ulong n8 = Gamma1(n6) + n1;
+        ulong n9 = Gamma1(n7) + n2;
+        ulong n10 = Gamma1(n8) + n3;
+        ulong n11 = Gamma1(n9) + n4;
+        ulong n12 = Gamma1(n10) + n5;
+        ulong n13 = Gamma1(n11) + n6;
+        ulong n14 = Gamma1(n12) + n7 + 131UL;
+        ulong n15 = Gamma1(n13) + n8 + Gamma0(n0) + 256UL;
+        W[0] = n0; W[1] = n1; W[2] = n2; W[3] = n3;
+        W[4] = n4; W[5] = n5; W[6] = n6; W[7] = n7;
+        W[8] = n8; W[9] = n9; W[10] = n10; W[11] = n11;
+        W[12] = n12; W[13] = n13; W[14] = n14; W[15] = n15;
+    }
+
+    #pragma unroll
+    for (int i = 16; i < 32; i++) SHA512_ROUND(i, W[i - 16]);
+
+    #pragma unroll
+    for (int i = 32; i < 80; i++) {
+        ulong w = Gamma1(W[(i - 2) & 15]) + W[(i - 7) & 15]
+                + Gamma0(W[(i - 15) & 15]) + W[i & 15];
+        W[i & 15] = w;
+        SHA512_ROUND(i, w);
+    }
+
+    a += 0x6a09e667f3bcc908UL; b += 0xbb67ae8584caa73bUL;
+    c += 0x3c6ef372fe94f82bUL; d += 0xa54ff53a5f1d36f1UL;
+    e += 0x510e527fade682d1UL; f += 0x9b05688c2b3e6c1fUL;
+    g += 0x1f83d9abfb41bd6bUL; h += 0x5be0cd19137e2179UL;
+    STORE64H(a, out);      STORE64H(b, out + 8);
+    STORE64H(c, out + 16); STORE64H(d, out + 24);
+    STORE64H(e, out + 32); STORE64H(f, out + 40);
+    STORE64H(g, out + 48); STORE64H(h, out + 56);
+}
+
+#undef SHA512_ROUND
+
 #undef Ch
 #undef Maj
 #undef S
