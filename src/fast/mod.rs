@@ -195,6 +195,10 @@ unsafe fn keygen_batch_simd(
     simd::batch_compress(&points, &mut pubkeys[..]);
 }
 
+fn reseed_lane(seed: &mut [u8; 32]) {
+    *seed = rand::random();
+}
+
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx512f,avx512ifma,avx512dq")]
 unsafe fn grind_thread_simd(
@@ -233,6 +237,7 @@ unsafe fn grind_thread_simd(
                     eprintln!("pubkey: {s}");
                     save_keypair(&used[j], &pubkeys[j], &s);
                 });
+                reseed_lane(&mut seeds[j]);
             }
         }
     }
@@ -278,6 +283,7 @@ fn grind_thread_neon(
                     eprintln!("pubkey: {s}");
                     save_keypair(&used[j], &pubkeys[j], &s);
                 });
+                reseed_lane(&mut seeds[j]);
             }
         }
     }
@@ -320,6 +326,7 @@ fn grind_thread_scalar(
                     eprintln!("pubkey: {s}");
                     save_keypair(&used[j], &pubkeys[j], &s);
                 });
+                reseed_lane(&mut seeds[j]);
             }
         }
     }
@@ -445,10 +452,14 @@ mod tests {
         keygen_batch(&mut seeds_copy, &mut used, &mut pubs);
         for j in 0..BATCH {
             assert_eq!(used[j], seeds[j]);
+            let h: [u8; 64] = Sha512::digest(seeds[j]).into();
+            assert_eq!(&seeds_copy[j], &h[32..64], "lane {j} chain");
             let theirs = SigningKey::from_bytes(&seeds[j])
                 .verifying_key()
                 .to_bytes();
             assert_eq!(pubs[j], theirs, "lane {j}");
+            reseed_lane(&mut seeds_copy[j]);
+            assert_ne!(&seeds_copy[j], &h[32..64], "lane {j} reseed");
         }
     }
 }
