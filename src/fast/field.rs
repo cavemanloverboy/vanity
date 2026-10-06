@@ -4,6 +4,7 @@ pub struct Fe(pub [u64; 5]);
 const MASK51: u64 = (1u64 << 51) - 1;
 
 impl Fe {
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub const ZERO: Fe = Fe([0, 0, 0, 0, 0]);
     pub const ONE: Fe = Fe([1, 0, 0, 0, 0]);
 
@@ -27,7 +28,7 @@ impl Fe {
         Fe(l)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_arch = "x86_64"))]
     pub fn from_bytes(b: &[u8; 32]) -> Fe {
         let load8 = |i: usize| -> u64 {
             u64::from_le_bytes([
@@ -260,12 +261,14 @@ impl Fe {
         (t19, t3)
     }
 
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     #[inline(always)]
     pub fn is_odd(&self) -> bool {
         (self.to_bytes()[0] & 1) == 1
     }
 }
 
+#[cfg(any(test, not(target_arch = "aarch64")))]
 pub fn batch_invert(zs: &mut [Fe]) {
     let n = zs.len();
     if n == 0 {

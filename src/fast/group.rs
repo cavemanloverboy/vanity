@@ -40,6 +40,7 @@ pub fn edwards_d2() -> Fe {
 }
 
 impl Point {
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     pub const IDENTITY: Point = Point {
         x: Fe::ZERO,
         y: Fe::ONE,
@@ -90,6 +91,7 @@ impl Point {
         .as_extended()
     }
 
+    #[cfg(any(test, not(target_arch = "aarch64")))]
     #[inline(always)]
     pub fn sub_niels(&self, n: &Niels) -> Point {
         let y_plus_x = self.y.add(&self.x);

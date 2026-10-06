@@ -431,20 +431,6 @@ fn bs58_probability(
     }
 }
 
-#[allow(dead_code)]
-fn expected_attempts(
-    prefix: &str,
-    suffix: &str,
-    case_insensitive: bool,
-) -> f64 {
-    let p = bs58_probability(prefix, suffix, case_insensitive);
-    if p <= 0.0 {
-        f64::INFINITY
-    } else {
-        1.0 / p
-    }
-}
-
 // ─── --pattern ──────────────────────────────────────────────────────────────
 
 #[derive(Clone, Debug, PartialEq, Eq)]

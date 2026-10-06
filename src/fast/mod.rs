@@ -7,20 +7,29 @@ pub mod sha512_simd;
 pub mod simd;
 
 pub use check_match::{MatchTargets, MAX_PATTERNS, MAX_PATTERN_LEN};
+#[cfg(any(test, not(target_arch = "aarch64")))]
 use field::{batch_invert, Fe};
+#[cfg(any(test, not(target_arch = "aarch64")))]
 use group::{edwards_d2, Niels, Point};
 
 use crate::{
     check_write_permissions, credit_kinds, save_keypair, ABORTED,
     TOTAL_ATTEMPTS,
 };
+#[cfg(any(test, not(target_arch = "aarch64")))]
 use sha2::{Digest, Sha512};
-use std::sync::{atomic::Ordering, OnceLock};
+use std::sync::atomic::Ordering;
+#[cfg(any(test, not(target_arch = "aarch64")))]
+use std::sync::OnceLock;
 
 pub const BATCH: usize = 512;
 
-// ─── base point ──────────────────────────────────────────────────────────────
+// ─── scalar ed25519 keygen ───────────────────────────────────────────────────
+//
+// Apple Silicon grinds with the NEON batch path. This reference
+// implementation stays for every other target, and for tests.
 
+#[cfg(any(test, not(target_arch = "aarch64")))]
 const BASE: Point = Point {
     x: Fe([
         1738742601995546,
@@ -48,8 +57,10 @@ const BASE: Point = Point {
 
 // ─── fixed-base comb table ───────────────────────────────────────────────────
 
+#[cfg(any(test, not(target_arch = "aarch64")))]
 struct CombTable(Vec<[Niels; 8]>);
 
+#[cfg(any(test, not(target_arch = "aarch64")))]
 fn comb_table() -> &'static CombTable {
     static TABLE: OnceLock<CombTable> = OnceLock::new();
     TABLE.get_or_init(|| {
@@ -72,6 +83,7 @@ fn comb_table() -> &'static CombTable {
     })
 }
 
+#[cfg(any(test, not(target_arch = "aarch64")))]
 #[inline]
 fn to_radix16(bytes: &[u8; 32]) -> [i8; 64] {
     let mut d = [0i8; 64];
@@ -89,6 +101,7 @@ fn to_radix16(bytes: &[u8; 32]) -> [i8; 64] {
     d
 }
 
+#[cfg(any(test, not(target_arch = "aarch64")))]
 #[inline]
 fn scalarmult_base(scalar: &[u8; 32], table: &CombTable) -> Point {
     let digits = to_radix16(scalar);
@@ -104,6 +117,7 @@ fn scalarmult_base(scalar: &[u8; 32], table: &CombTable) -> Point {
     acc
 }
 
+#[cfg(any(test, not(target_arch = "aarch64")))]
 #[inline(always)]
 fn clamp(h: &[u8; 64]) -> [u8; 32] {
     let mut s = [0u8; 32];
@@ -114,6 +128,7 @@ fn clamp(h: &[u8; 64]) -> [u8; 32] {
     s
 }
 
+#[cfg(any(test, not(target_arch = "aarch64")))]
 fn batch_compress(points: &[Point], out: &mut [[u8; 32]]) {
     let n = points.len();
     let mut zs: Vec<Fe> = points.iter().map(|p| p.z).collect();
@@ -128,6 +143,7 @@ fn batch_compress(points: &[Point], out: &mut [[u8; 32]]) {
     }
 }
 
+#[cfg(any(test, not(target_arch = "aarch64")))]
 fn keygen_batch(
     seeds: &mut [[u8; 32]; BATCH],
     used: &mut [[u8; 32]; BATCH],
@@ -145,7 +161,7 @@ fn keygen_batch(
     batch_compress(&points, pubkeys);
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_arch = "x86_64"))]
 pub(crate) fn scalarmult_compress_scalar(
     scalar: &[u8; 32],
 ) -> [u8; 32] {
@@ -290,6 +306,7 @@ fn grind_thread_neon(
     TOTAL_ATTEMPTS.fetch_add(local, Ordering::Relaxed);
 }
 
+#[cfg(not(target_arch = "aarch64"))]
 fn grind_thread_scalar(
     target: &MatchTargets,
     min_count: u32,

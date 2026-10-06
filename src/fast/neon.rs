@@ -597,7 +597,7 @@ fn base_point() -> Point {
 struct Comb(Vec<Affine>);
 
 const COMB_W: usize = 8;
-const COMB_WINDOWS: usize = (256 + COMB_W - 1) / COMB_W;
+const COMB_WINDOWS: usize = 256_usize.div_ceil(COMB_W);
 const COMB_POS: usize = 1 << (COMB_W - 1);
 
 fn comb() -> &'static Comb {
